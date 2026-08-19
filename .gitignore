@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 环境与密钥
+.env
+.env.*
+
+# 评测产物（本地生成，不入库）
+eval_out/
+reports/
+*.jsonl
+!examples/**/*.jsonl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
