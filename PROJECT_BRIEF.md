@@ -22,7 +22,7 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 | docs/G3-3-checker计划.md | G3 第 3 步可执行计划（判分双模语义 + 2.4 用例表 + TDD 步骤） |
 | docs/G3-4-planner计划.md | G3 第 4 步可执行计划（LLM 候选生成 + 严格校验 + mock 测试策略） |
 | docs/G3-5-api路由计划.md | G3 第 5 步可执行计划（8 路由串通 + 错误映射 + curl 冒烟 + TestClient TDD） |
-| docs/G3-6-前端计划.md | G3 第 6 步可执行计划（前端三区 + 候选编辑 PUT + complete + 静态伺服 + K1-K7 走查） |
+| docs/G3-6-前端计划.md | G3 第 6 步可执行计划（前端三区 + 候选编辑 PUT + complete + 静态伺服 + DeepTutor 风格迭代 v2 + K1-K8 走查） |
 | docs/复盘日志.md | 每次会话 3 行复盘（坑归档进本档案已知坑） |
 | backend/main.py | FastAPI 路由：goals/paths/tasks/attempts/export |
 | backend/planner.py | DeepSeek 生成候选路径（含难度标注）→ 严格 JSON 校验 → draft |
@@ -69,7 +69,7 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 | 主线：G1 方案设计 | 已完成 | 方案落盘 docs/G1-方案.md（v2） | 无 |
 | 主线：G3 第4步 planner | 已完成 | test_planner.py 18 用例 + 全量 56 绿 + 示例候选渲染已终审；SDK 验证：PyPI deepseek 1.0.0 系第三方 deskpai 非官方 → openai SDK + base_url（client 注入式） | 无 |
 | 主线：G3 第5步 API 路由 | 已完成 | test_api.py 18 用例 + 全量 77 绿；curl 冒烟（health/goals/export 通、无 key generate→503）已获用户终审确认并推送 | 无 |
-| 支线：前端骨架 | 计划已落盘（待用户确认） | 按 docs/G3-6-前端计划.md 执行（三区 + fetch 联调 + 候选编辑 PUT） | 等用户确认计划 |
+| 支线：前端骨架 | 决策已确认，待开工 | 按 docs/G3-6-前端计划.md 执行（三区 + fetch 联调 + 候选编辑 PUT + 风格迭代 v2） | 等开工指令 |
 
 ## 完成定义（验收 + 安全双清单）
 
