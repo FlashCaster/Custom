@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Custom</title>
+  <style>
+    /* G2 骨架：三区布局占位（左导航 | 主区任务 | 右上角进度） */
+    body { display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 56px 1fr; height: 100vh; margin: 0; font-family: system-ui, sans-serif; }
+    header { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; border-bottom: 1px solid #ddd; }
+    nav { grid-column: 1; border-right: 1px solid #ddd; padding: 12px; overflow: auto; }
+    main { grid-column: 2; padding: 16px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Custom</h1>
+    <div id="progress">进度 0%</div>
+  </header>
+  <nav id="nav">
+    <!-- TODO(G3-第6步): 当前阶段+任务置顶列表 -->
+    <p>任务导航（骨架占位）</p>
+  </nav>
+  <main id="main">
+    <!-- TODO(G3-第6步): 任务详情（学习目标/quiz/产出要求） -->
+    <p>任务详情（骨架占位）</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# G2 最小依赖 + G3-4 起引入 openai SDK
+# LLM SDK 验证结论（G3-4 §4，2026-08-20）：PyPI deepseek 1.0.0 系第三方 deskpai 发布、非官方
+# → 用 openai SDK + base_url=https://api.deepseek.com（model=deepseek-chat）；planner 本身不 import SDK（client 注入式）
+fastapi
+uvicorn
+pytest
+openai
