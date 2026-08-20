@@ -24,8 +24,12 @@
 ## 项目状态
 
 - ✅ G0 立项完成（五路调研 + 立项书 + ADR 决策记录）
-- ✅ G1 方案设计确认（数据结构 / 模块划分 / 测试策略 / 分步实施）
-- ⏳ 下一步：G2 脚手架（FastAPI 骨架 + pytest 占位 + deepseek SDK 验证）
+- ✅ G1 方案设计确认（[`docs/G1-方案.md`](./docs/G1-方案.md)：数据结构 / 模块划分 / 测试策略 / 分步实施 / 安全设计）
+- ✅ G2 脚手架完成（FastAPI 骨架 + pytest 占位绿 + uvicorn /health ok；`.venv` 就绪：fastapi/uvicorn/pytest）
+- ✅ G3 第 2 步 store.py + schema（TDD，23 用例绿）
+- ✅ G3 第 3 步 checker（TDD，全量 38 绿）
+- ✅ G3 第 4 步 planner（TDD，全量 56 绿；SDK 验证 → openai 兼容协议 + client 注入式）
+- ⏳ 下一步：G3 第 5 步 API 路由（计划已落盘 [`docs/G3-5-api路由计划.md`](./docs/G3-5-api路由计划.md)，待确认开工）
 
 ## 文档入口
 
@@ -33,6 +37,8 @@
 |---|---|
 | [`research.md`](./research.md) | 立项研究：为什么做这件事（五路调研证据） |
 | [`PROJECT_BRIEF.md`](./PROJECT_BRIEF.md) | 项目档案（唯一事实来源）：核心目标 / 决策 / 已知坑 / 完成定义 |
+| [`docs/G1-方案.md`](./docs/G1-方案.md) | G1 方案 v2：数据结构 / 模块划分 / 测试策略 / 分步实施 / 安全设计 |
+| [`docs/G3-*-计划.md`](./docs/) | G3 分步实施可执行计划（3-checker / 4-planner / 5-api路由） |
 | [`ADR/`](./ADR/) | 决策记录（一个决策一个文件） |
 
 ## License
