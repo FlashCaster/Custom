@@ -209,6 +209,26 @@ def create_path(goal_id: int, title: str, stages: list[dict] | None = None,
         return pid
 
 
+def update_path(path_id: int, title: str, stages: list[dict], path: Path | None = None) -> None:
+    """候选修改落地：title+stages 全量替换——单事务内删旧 stages（外键级联清 tasks/attempts）
+    → 重插；中途失败原子回滚（旧树无恙）。不查 status（draft 门 → API 层 409）、不改 status。"""
+    _require_nonempty_str(title, "title")
+    if not isinstance(stages, list):
+        raise ValueError("stages 必须是 list")
+    with _conn(path) as conn:
+        row = conn.execute("SELECT id FROM paths WHERE id=?", (path_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"path {path_id} 不存在")
+        conn.execute("UPDATE paths SET title=? WHERE id=?", (title, path_id))
+        conn.execute("DELETE FROM stages WHERE path_id=?", (path_id,))
+        for st in stages:
+            if not isinstance(st, dict):
+                raise ValueError("每个 stage 必须是 dict")
+            sid = _insert_stage(conn, path_id, st.get("title", ""), None)
+            for t in st.get("tasks", []):
+                _insert_task(conn, sid, **t)
+
+
 def create_stage(path_id: int, title: str, position: int | None = None,
                  path: Path | None = None) -> int:
     with _conn(path) as conn:

@@ -23,6 +23,12 @@
 | T05 | 正常-store新增 | list_paths 按 goal 过滤 / export_all 空库与满库 | 结构正确 |
 | C01 | 并发 | 12 线程写 attempts | 12 条全部入库、无丢失 |
 | C02 | 并发 | 8 线程建 goal | id 唯一、数量正确 |
+| U01 | G3-6 正常-最小 | update_path 仅换 title（stages 原样非空） | 树更新、status 仍 draft |
+| U02 | G3-6 正常-典型 | 全量替换 2 stages 3 tasks（已有 attempts） | 新树正确、旧 attempts 级联清空零残留 |
+| U03 | G3-6 原子性 | 替换中途失败（第二 stage 坏 kind） | ValueError，旧树原样无恙 |
+| U04 | G3-6 攻击 | 不存在 path / title 空白 / stages 非 list | ValueError |
+| U05 | G3-6 攻击-特殊字符 | title 注入串 + emoji + 引号 | 往返一致（参数化） |
+| U06 | G3-6 边界/职责 | 空 stages / active 状态更新 | store 层允许（清树/不查 status）；非空门在 API 层 |
 """
 from __future__ import annotations
 
@@ -456,3 +462,119 @@ def test_export_all_nested_with_attempts(db):
     assert [a["result"] for a in g2_tasks[-1]["attempts"]] == ["pass"]
 
     assert dump["goals"][2]["paths"] == []  # 无 path 的 goal
+
+
+# ---------- G3-第6步新增：update_path（候选修改落地，单事务全量替换） ----------
+
+def _spec_stages():
+    """update_path 入参规格（与 create_path 的 stages 同形）：1 stage 2 tasks。"""
+    return [
+        {"title": "规格阶段", "tasks": [
+            {"kind": "quiz", "title": "sq1", "difficulty": 1, "brief": "sb1",
+             "quiz": _quiz(), "acceptance": [], "skills": ["prompt"]},
+            {"kind": "artifact", "title": "sa1", "difficulty": 2, "brief": "sb2",
+             "acceptance": ["规格验收"], "skills": []},
+        ]},
+    ]
+
+
+def _alt_stages():
+    """全量替换载荷：2 stages 3 tasks（quiz×2 + artifact×1）。"""
+    return [
+        {"title": "新阶段1", "tasks": [
+            {"kind": "quiz", "title": "nq1", "difficulty": 0, "brief": "nb1",
+             "quiz": _quiz(q="新问题？", answer=1), "acceptance": [], "skills": []},
+            {"kind": "artifact", "title": "na1", "difficulty": 1, "brief": "nb2",
+             "acceptance": ["新验收1", "新验收2"], "skills": ["new"]},
+        ]},
+        {"title": "新阶段2", "tasks": [
+            {"kind": "quiz", "title": "nq2", "difficulty": 3, "brief": "nb3",
+             "quiz": _quiz(q="另一题？", options=["仅A"], answer=0), "acceptance": [], "skills": []},
+        ]},
+    ]
+
+
+def test_update_path_title_only_keeps_tree_shape(db):
+    """U01 正常-最小：仅换 title（stages 原样非空全量提交）→ title 更新、status 仍 draft、树形不变。"""
+    gid = _mk_goal(db)
+    pid = store.create_path(gid, "旧标题", stages=_spec_stages(), path=db)
+    before = store.get_path(pid, path=db)
+    store.update_path(pid, "新标题", _spec_stages(), path=db)
+    after = store.get_path(pid, path=db)
+    assert after["title"] == "新标题"
+    assert after["status"] == "draft"
+    assert [s["title"] for s in after["stages"]] == [s["title"] for s in before["stages"]]
+    assert [[t["title"] for t in s["tasks"]] for s in after["stages"]] == \
+           [[t["title"] for t in s["tasks"]] for s in before["stages"]]
+
+
+def test_update_path_full_replace_clears_old_attempts(db):
+    """U02 正常-典型：全量替换 → 新树正确；旧 tasks/attempts 级联清空、attempts 表零残留。"""
+    gid = _mk_goal(db)
+    pid, old_tasks = _mk_full_path(db, gid)
+    for t in old_tasks:
+        store.record_attempt(t["id"], t["difficulty"], "pass", "old", path=db)
+    store.update_path(pid, "替换后路径", _alt_stages(), path=db)
+    after = store.get_path(pid, path=db)
+    assert after["title"] == "替换后路径"
+    assert [s["title"] for s in after["stages"]] == ["新阶段1", "新阶段2"]
+    tasks = [t for s in after["stages"] for t in s["tasks"]]
+    assert [t["kind"] for t in tasks] == ["quiz", "artifact", "quiz"]
+    assert tasks[1]["acceptance"] == ["新验收1", "新验收2"]
+    for t in old_tasks:
+        assert store.get_task(t["id"], path=db) is None
+    conn = store.get_conn(db)
+    assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+    conn.close()
+
+
+def test_update_path_atomic_rollback_on_bad_stage(db):
+    """U03 原子性：替换中途失败（第二 stage 坏 kind）→ ValueError，旧树与旧 attempts 原样无恙。"""
+    gid = _mk_goal(db)
+    pid, tasks = _mk_full_path(db, gid)
+    store.record_attempt(tasks[0]["id"], 1, "pass", "keep", path=db)
+    bad = [{"title": "新阶段", "tasks": [
+                {"kind": "quiz", "title": "ok", "difficulty": 1, "quiz": _quiz()}]},
+           {"title": "坏阶段", "tasks": [{"kind": "essay", "title": "bad", "difficulty": 1}]}]
+    with pytest.raises(ValueError):
+        store.update_path(pid, "不会成功", bad, path=db)
+    after = store.get_path(pid, path=db)
+    assert after["title"] == "AI 工程师路径"  # 旧标题未动
+    assert [s["title"] for s in after["stages"]] == ["阶段1", "阶段2"]  # 旧树无恙
+    assert store.get_attempts(tasks[0]["id"], path=db)[0]["evidence"] == "keep"
+
+
+def test_update_path_not_found_and_invalid_args(db):
+    """U04 攻击：不存在 path / title 空白 / stages 非 list → ValueError。"""
+    gid = _mk_goal(db)
+    pid, _ = _mk_full_path(db, gid)
+    with pytest.raises(ValueError):
+        store.update_path(999, "t", _spec_stages(), path=db)
+    with pytest.raises(ValueError):
+        store.update_path(pid, "   ", _spec_stages(), path=db)
+    with pytest.raises(ValueError):
+        store.update_path(pid, "t", "not a list", path=db)
+
+
+def test_update_path_special_chars_roundtrip(db):
+    """U05 攻击-特殊字符：title 注入串 + emoji + 引号 → 往返一致（参数化），库完好。"""
+    gid = _mk_goal(db)
+    pid, _ = _mk_full_path(db, gid)
+    payload = "'); DROP TABLE paths;-- 😀 '单引号' \"双引号\""
+    store.update_path(pid, payload, _spec_stages(), path=db)
+    assert store.get_path(pid, path=db)["title"] == payload
+    assert store.list_paths(path=db)  # 表仍在、数据完好
+
+
+def test_update_path_empty_stages_and_status_not_gated(db):
+    """U06 边界/职责：空 stages store 层允许（清树，与 create_path 一致；非空门在 API 层 400）；
+    store 不查 status（draft 门在 API 层 409），active 路径同样可更新且 status 不变。"""
+    gid = _mk_goal(db)
+    pid, tasks = _mk_full_path(db, gid)
+    store.set_path_status(pid, "active", path=db)
+    store.update_path(pid, "空树", [], path=db)
+    after = store.get_path(pid, path=db)
+    assert after["stages"] == []
+    assert after["status"] == "active"
+    for t in tasks:
+        assert store.get_task(t["id"], path=db) is None

@@ -23,6 +23,25 @@
 | A12 | 攻击-超长 | statement 501 字 / interests 11 项 / 单项 101 字 | 422 |
 | A13 | 集成-攻击 | fake client 抛 RuntimeError / 返回坏 JSON / 无 key 工厂 | 502 / 400 / 503，进程不崩 |
 
+G3-第6步新增用例（PUT 候选修改 + complete + 静态伺服）：
+
+| 编号 | 类别 | 输入 | 预期 |
+|---|---|---|---|
+| T06 | 正常-最小 | PUT 仅换 title（stages 原样非空） | 200 树更新、status 仍 draft |
+| T07 | 正常-典型 | PUT 全量替换 2 stages 3 tasks（已有 attempts） | 200 新树；旧 attempts 级联清空、进度归零 |
+| T08 | 正常-复杂 | PUT → activate → PUT → complete ×2 → PUT | 200/200/409/200/200/409（仅 draft 可改） |
+| T09 | 正常-集成 | GET / 与 /app.js 静态伺服 | 200 三区标记 / 200 js / 未知文件 404 / /health 不被吞 |
+| A14 | 攻击-空数据 | title 空白 / stages 空 list / body 空对象 | 400 / 400（裁决 A）/ 422 |
+| A15 | 攻击-极值 | stages 11 / 单 stage tasks 11 / difficulty 4 | 400（validate 上限兜底） |
+| A16 | 攻击-越界 | PUT/complete 不存在 path | 404 |
+| A17 | 攻击-脏数据 | title 前后空格 | 保留往返 |
+| A18 | 攻击-特殊字符 | title 注入串 + emoji + 引号 | 200 往返一致（参数化） |
+| A19 | 攻击-异常格式 | body 非 JSON / stages 非 list / title 非 str | 422 |
+| A20 | 攻击-缺失字段 | PUT 缺 stages / 缺 title | 422 |
+| A21 | 攻击-未知结构 | body/stage/task 多余键 | 忽略，200 |
+| A22 | 组合1 | PUT 替换后 GET /export | 嵌套与新树一致、旧 attempts 无残留 |
+| A23 | 组合2 | PUT 含坏 quiz（answer 越界） | 400 且库原子未变（旧树仍在） |
+
 实现说明：每个用例独立 SQLite（monkeypatch store.DB_PATH，lifespan 幂等 init_db）；
 fake client 经 app.dependency_overrides 注入（本文件不碰真实网络/key）；
 无 key 分支用 monkeypatch.delenv 保证隔离，只测 503 语义。
@@ -371,3 +390,209 @@ def test_client_failure_modes(api, monkeypatch):
 def test_health(api):
     """G2 遗留 /health 保留。"""
     assert api.get("/health").json() == {"status": "ok"}
+
+
+# ---------- G3-第6步：PUT 候选修改 + complete + 静态伺服 ----------
+
+_PUT_STAGES = [
+    {"title": "阶段一", "tasks": [
+        {"kind": "quiz", "title": "PQ1", "brief": "pb1", "difficulty": 1,
+         "quiz": {"q": "哪项正确？", "options": ["选项A", "选项B"], "answer": 0,
+                  "explanation": "解析A"}},
+        {"kind": "artifact", "title": "PA1", "brief": "pb2", "difficulty": 2,
+         "acceptance": ["检查1"]},
+    ]},
+]
+_PUT_STAGES_2 = [
+    {"title": "新阶段一", "tasks": [
+        {"kind": "quiz", "title": "NQ1", "brief": "nb1", "difficulty": 0,
+         "quiz": {"q": "新问题？", "options": ["X", "Y", "Z"], "answer": 2}},
+        {"kind": "artifact", "title": "NA1", "brief": "nb2", "difficulty": 1,
+         "acceptance": ["c1", "c2"]},
+    ]},
+    {"title": "新阶段二", "tasks": [
+        {"kind": "quiz", "title": "NQ2", "brief": "nb3", "difficulty": 3,
+         "quiz": {"q": "再来一题？", "options": ["M", "N"], "answer": 1}},
+    ]},
+]
+
+
+def _mk_draft(title="候选路径", stages=None):
+    """直接经 store 造 draft 路径（绕过 generate，供 PUT/complete 用例）。"""
+    gid = store.create_goal("学 X")
+    pid = store.create_path(gid, title, stages=stages or _PUT_STAGES)
+    return gid, pid
+
+
+def test_put_title_only_keeps_draft(api):
+    """T06 正常-最小：PUT 仅换 title（stages 原样非空）→ 200 树更新、status 仍 draft。"""
+    _, pid = _mk_draft()
+    r = api.put(f"/paths/{pid}", json={"title": "新标题", "stages": _PUT_STAGES})
+    assert r.status_code == 200
+    tree = r.json()
+    assert tree["title"] == "新标题" and tree["status"] == "draft"
+    assert [s["title"] for s in tree["stages"]] == ["阶段一"]
+    assert [t["title"] for t in tree["stages"][0]["tasks"]] == ["PQ1", "PA1"]
+
+
+def test_put_full_replace_cascades_attempts(api):
+    """T07 正常-典型：PUT 全量替换 → 200 新树；旧 attempts 级联清空、进度归零。"""
+    _, pid = _mk_draft()
+    old_tasks = [t for s in store.get_path(pid)["stages"] for t in s["tasks"]]
+    assert api.post(f"/tasks/{old_tasks[0]['id']}/attempts", json={"answer": 0}).json()["result"] == "pass"
+    assert api.post(f"/tasks/{old_tasks[1]['id']}/attempts",
+                    json={"checklist": [True]}).json()["result"] == "pass"
+    r = api.put(f"/paths/{pid}", json={"title": "替换后", "stages": _PUT_STAGES_2})
+    assert r.status_code == 200
+    tree = r.json()
+    assert [s["title"] for s in tree["stages"]] == ["新阶段一", "新阶段二"]
+    tasks = [t for s in tree["stages"] for t in s["tasks"]]
+    assert [t["title"] for t in tasks] == ["NQ1", "NA1", "NQ2"]
+    prog = api.get(f"/paths/{pid}/progress").json()
+    assert prog == {"current_task_id": tasks[0]["id"], "current_stage_id": tasks[0]["stage_id"],
+                    "completed": 0, "total": 3, "percent": 0}
+
+
+def test_put_activate_complete_flow_and_409(api):
+    """T08 正常-复杂：仅 draft 可改——PUT → activate → PUT(409) → complete ×2 幂等 → PUT(409)。"""
+    _, pid = _mk_draft()
+    assert api.put(f"/paths/{pid}", json={"title": "t1", "stages": _PUT_STAGES}).status_code == 200
+    assert api.post(f"/paths/{pid}/activate").status_code == 200
+    assert api.put(f"/paths/{pid}", json={"title": "t2", "stages": _PUT_STAGES}).status_code == 409
+    assert api.post(f"/paths/{pid}/complete").status_code == 200
+    assert api.post(f"/paths/{pid}/complete").status_code == 200  # 幂等
+    assert api.get(f"/paths/{pid}").json()["status"] == "done"
+    assert api.put(f"/paths/{pid}", json={"title": "t3", "stages": _PUT_STAGES}).status_code == 409
+
+
+def test_static_serving_index_appjs_and_404(api):
+    """T09 正常-集成：GET / → 200 html 含三区标记；/app.js → 200；未知静态 404；/health 不被吞。"""
+    r = api.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "<nav" in r.text and "<main" in r.text and "progress" in r.text
+    r = api.get("/app.js")
+    assert r.status_code == 200
+    assert "javascript" in r.headers["content-type"]
+    assert api.get("/no-such-file.xyz").status_code == 404
+    assert api.get("/health").status_code == 200
+
+
+def test_put_blank_title_empty_stages_empty_body(api):
+    """A14 攻击-空数据：title 空白 → 400；stages 空 list → 400（裁决 A）；body 空对象 → 422。"""
+    _, pid = _mk_draft()
+    assert api.put(f"/paths/{pid}", json={"title": "   ", "stages": _PUT_STAGES}).status_code == 400
+    r = api.put(f"/paths/{pid}", json={"title": "t", "stages": []})
+    assert r.status_code == 400
+    assert "stages" in r.json()["detail"]
+    assert api.put(f"/paths/{pid}", json={}).status_code == 422
+
+
+def test_put_limits_stages_tasks_difficulty(api):
+    """A15 攻击-极值：stages 11 / 单 stage tasks 11 / difficulty 4 → 400（validate 上限兜底）。"""
+    _, pid = _mk_draft()
+
+    def _task(i, diff=1):
+        return {"kind": "quiz", "title": f"t{i}", "brief": "b", "difficulty": diff,
+                "quiz": {"q": "q", "options": ["a", "b"], "answer": 0}}
+
+    r = api.put(f"/paths/{pid}", json={"title": "t", "stages": [
+        {"title": f"s{i}", "tasks": [_task(i)]} for i in range(11)]})
+    assert r.status_code == 400
+    r = api.put(f"/paths/{pid}", json={"title": "t", "stages": [
+        {"title": "s", "tasks": [_task(i) for i in range(11)]}]})
+    assert r.status_code == 400
+    r = api.put(f"/paths/{pid}", json={"title": "t", "stages": [
+        {"title": "s", "tasks": [_task(0, diff=4)]}]})
+    assert r.status_code == 400
+
+
+def test_put_complete_nonexistent_404(api):
+    """A16 攻击-越界：PUT/complete 不存在 path → 404。"""
+    assert api.put("/paths/999", json={"title": "t", "stages": _PUT_STAGES}).status_code == 404
+    assert api.post("/paths/999/complete").status_code == 404
+
+
+def test_put_title_whitespace_roundtrip(api):
+    """A17 攻击-脏数据：title 前后空格保留往返（与 statement 策略一致）。"""
+    _, pid = _mk_draft()
+    r = api.put(f"/paths/{pid}", json={"title": "  前后空格  ", "stages": _PUT_STAGES})
+    assert r.status_code == 200
+    assert api.get(f"/paths/{pid}").json()["title"] == "  前后空格  "
+
+
+def test_put_title_injection_emoji_roundtrip(api):
+    """A18 攻击-特殊字符：title 注入串 + emoji + 引号 → 200 往返一致（参数化），库完好。"""
+    _, pid = _mk_draft()
+    payload = "'); DROP TABLE paths;-- 😀 '单引号' \"双引号\""
+    r = api.put(f"/paths/{pid}", json={"title": payload, "stages": _PUT_STAGES})
+    assert r.status_code == 200
+    assert api.get(f"/paths/{pid}").json()["title"] == payload
+    assert api.get("/health").status_code == 200
+
+
+def test_put_non_json_body_and_bad_types(api):
+    """A19 攻击-异常格式：body 非 JSON / stages 非 list / title 非 str → 422。"""
+    _, pid = _mk_draft()
+    r = api.put(f"/paths/{pid}", content="not json",
+                headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    assert api.put(f"/paths/{pid}", json={"title": "t", "stages": "not a list"}).status_code == 422
+    assert api.put(f"/paths/{pid}", json={"title": 123, "stages": _PUT_STAGES}).status_code == 422
+
+
+def test_put_missing_fields_422(api):
+    """A20 攻击-缺失字段：缺 stages / 缺 title → 422。"""
+    _, pid = _mk_draft()
+    assert api.put(f"/paths/{pid}", json={"title": "t"}).status_code == 422
+    assert api.put(f"/paths/{pid}", json={"stages": _PUT_STAGES}).status_code == 422
+
+
+def test_put_extra_keys_ignored(api):
+    """A21 攻击-未知结构：body/stage/task 多余键忽略（pydantic + validate 剔除），200。"""
+    _, pid = _mk_draft()
+    r = api.put(f"/paths/{pid}", json={"title": "t", "stages": _PUT_STAGES, "hack": 1})
+    assert r.status_code == 200 and "hack" not in r.json()
+    junk = [{"title": "s", "x": 1, "tasks": [
+        {"kind": "artifact", "title": "a", "brief": "b", "difficulty": 1,
+         "acceptance": ["c"], "junk": 2}]}]
+    r = api.put(f"/paths/{pid}", json={"title": "t2", "stages": junk})
+    assert r.status_code == 200
+    assert "x" not in r.json()["stages"][0]
+    assert "junk" not in r.json()["stages"][0]["tasks"][0]
+
+
+def test_put_then_export_matches_new_tree(api):
+    """A22 组合1：PUT 替换后 GET /export → 嵌套与新树一致、旧 attempts 无残留。"""
+    _, pid = _mk_draft()
+    old_tasks = [t for s in store.get_path(pid)["stages"] for t in s["tasks"]]
+    api.post(f"/tasks/{old_tasks[0]['id']}/attempts", json={"answer": 0})
+    api.put(f"/paths/{pid}", json={"title": "替换后", "stages": _PUT_STAGES_2})
+    dump = api.get("/export").json()
+    paths = dump["goals"][0]["paths"]
+    assert len(paths) == 1 and paths[0]["title"] == "替换后"
+    tasks = [t for s in paths[0]["stages"] for t in s["tasks"]]
+    assert [t["title"] for t in tasks] == ["NQ1", "NA1", "NQ2"]
+    assert all(t["attempts"] == [] for t in tasks)
+
+
+def test_put_bad_quiz_400_and_atomic(api):
+    """A23 组合2：PUT 含坏 quiz（answer 越界）→ 400 且库原子未变（旧树仍在）。"""
+    _, pid = _mk_draft(title="旧树")
+    bad = [{"title": "s", "tasks": [{"kind": "quiz", "title": "t", "brief": "b",
+            "difficulty": 1, "quiz": {"q": "q", "options": ["a", "b"], "answer": 9}}]}]
+    r = api.put(f"/paths/{pid}", json={"title": "新标题", "stages": bad})
+    assert r.status_code == 400
+    tree = api.get(f"/paths/{pid}").json()
+    assert tree["title"] == "旧树"
+    assert [t["title"] for t in tree["stages"][0]["tasks"]] == ["PQ1", "PA1"]
+
+
+def test_complete_any_status_idempotent(api):
+    """complete：draft 可直接 done（不强制先 activate）→ 200 + 完整树；幂等。"""
+    _, pid = _mk_draft()
+    r = api.post(f"/paths/{pid}/complete")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "done" and body["stages"]  # 返回 get_path 完整树
+    assert api.post(f"/paths/{pid}/complete").json()["status"] == "done"

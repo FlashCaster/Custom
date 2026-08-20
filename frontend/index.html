@@ -4,27 +4,189 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Custom</title>
+  <!-- favicon：内联 SVG data-URI（双色圆点呼应 logo），零额外文件，免 GET /favicon.ico 404 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FCFCFD'/%3E%3Ccircle cx='12' cy='16' r='6' fill='%234A90D2'/%3E%3Ccircle cx='21' cy='16' r='6' fill='%23E8A13C' fill-opacity='0.9'/%3E%3C/svg%3E">
   <style>
-    /* G2 骨架：三区布局占位（左导航 | 主区任务 | 右上角进度） */
-    body { display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 56px 1fr; height: 100vh; margin: 0; font-family: system-ui, sans-serif; }
-    header { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; border-bottom: 1px solid #ddd; }
-    nav { grid-column: 1; border-right: 1px solid #ddd; padding: 12px; overflow: auto; }
-    main { grid-column: 2; padding: 16px; overflow: auto; }
+    /* ===== 设计 token（G3-6 §2.4 风格迭代 v2：纸感编辑风 / DeepTutor 参考） ===== */
+    :root {
+      --bg: #F7F7F8;            /* 主区背景 */
+      --bg-sidebar: #F3F3F4;    /* 左侧栏背景（比主区深一度） */
+      --bg-card: #FCFCFD;       /* 卡片 / 输入容器 */
+      --bg-active: #E9E9EB;     /* 导航激活 / hover */
+      --line: #E6E6E9;          /* 发丝线边框 / 分隔（代替阴影） */
+      --ink: #17171A;           /* 主文字（近黑） */
+      --ink-2: #6E6E73;         /* 次级文字 */
+      --ink-3: #A2A2A8;         /* 占位符 / 细线图标 */
+      --accent: #A9B8E8;        /* 主动作（柔和 periwinkle） */
+      --accent-soft: #EEF1FB;   /* 选中态浅底 */
+      --brand-1: #4A90D2;       /* 双色 logo 蓝 */
+      --brand-2: #E8A13C;       /* 双色 logo 橙 */
+      --ok: #4CAF7D;            /* pass 状态色 */
+      --err: #D96459;           /* fail 状态色 */
+      --ok-soft: #EAF4EE;       /* pass 浅底 */
+      --err-soft: #FBEEEC;      /* fail 浅底 */
+      --white: #FFFFFF;
+      --font-serif: Georgia, "Times New Roman", "STSong", "SimSun", serif;
+      --font-sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.6 var(--font-sans); }
+    button { font: inherit; }
+
+    .app { display: grid; grid-template-columns: 260px 1fr; height: 100vh; }
+
+    /* ===== 左侧栏（参考图导航栏） ===== */
+    #sidebar { background: var(--bg-sidebar); border-right: 1px solid var(--line);
+               display: flex; flex-direction: column; padding: 20px 16px; min-height: 0; }
+    .logo { font-family: var(--font-serif); font-size: 22px; font-weight: 700;
+            padding: 4px 8px 20px; letter-spacing: .5px; }
+    .logo .b1 { color: var(--brand-1); }
+    .logo .b2 { color: var(--brand-2); }
+    .nav-tree { flex: 1; overflow-y: auto; min-height: 0; }
+    .nav-group-title { font-size: 12.5px; color: var(--ink-3); padding: 0 8px; margin: 24px 0 4px; }
+    .nav-group-title:first-child { margin-top: 0; }
+    .nav-item { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px;
+                margin-bottom: 4px; border-radius: 10px; color: var(--ink-2); cursor: pointer;
+                font-size: 14px; border: 1px solid transparent; }
+    .nav-item:hover { background: var(--bg-active); color: var(--ink); }
+    .nav-item.current { background: var(--bg-active); color: var(--ink); font-weight: 600; }
+    .nav-item.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); }
+    .nav-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .nav-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+    .nav-check { color: var(--ok); flex: none; font-size: 12.5px; }
+    .sidebar-footer { border-top: 1px solid var(--line); padding-top: 12px;
+                      display: flex; justify-content: space-between; align-items: center; }
+    .sidebar-footer .ver { font-size: 12.5px; color: var(--ink-3); }
+    .empty-state { color: var(--ink-3); font-size: 12.5px; padding: 12px 8px; }
+
+    /* ===== 主列 ===== */
+    .main-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px;
+              height: 64px; padding: 0 24px; border-bottom: 1px solid var(--line); flex: none; }
+    .topbar-title { font-family: var(--font-serif); font-size: 20px; font-weight: 600; margin: 0;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topbar-right { display: flex; align-items: center; gap: 16px; flex: none; }
+    .progress-wrap { display: flex; align-items: center; gap: 8px; width: 220px; }
+    .progress-track { flex: 1; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+    .progress-fill { height: 100%; width: 0; border-radius: 3px; background: var(--accent); transition: width .3s; }
+    .progress-text { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+    #main { flex: 1; overflow-y: auto; min-height: 0; }
+    .container { max-width: 960px; margin: 0 auto; padding: 32px 24px 64px; }
+
+    /* ===== 新目标（hero + 大圆角输入卡） ===== */
+    .hero { padding-top: 12vh; display: flex; flex-direction: column; align-items: center; }
+    .hero-title { font-family: var(--font-serif); font-size: 40px; font-weight: 700; margin: 0 0 12px; }
+    .hero-sub { color: var(--ink-2); margin: 0 0 32px; }
+    .input-card { width: 100%; max-width: 720px; background: var(--bg-card);
+                  border: 1px solid var(--line); border-radius: 18px; padding: 20px 24px;
+                  box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+    .input-card textarea { width: 100%; min-height: 64px; border: none; background: transparent;
+                           resize: vertical; font: inherit; color: var(--ink); outline: none; }
+    .input-card textarea::placeholder, .input-card input::placeholder { color: var(--ink-3); }
+    .input-card .interests { width: 100%; border: none; border-top: 1px solid var(--line);
+                             background: transparent; padding: 12px 0 0; font: inherit; color: var(--ink); outline: none; }
+    .input-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; gap: 12px; }
+    .hint { font-size: 12.5px; color: var(--err); }
+    .hint.info { color: var(--ink-3); }
+
+    /* ===== 按钮 ===== */
+    .btn-primary { background: var(--accent); color: var(--white); border: none; border-radius: 10px;
+                   padding: 10px 20px; font-size: 14px; cursor: pointer; display: inline-flex;
+                   align-items: center; gap: 8px; }
+    .btn-primary:hover { background: var(--accent); filter: brightness(.97); }
+    .btn-primary:disabled { opacity: .55; cursor: default; filter: none; }
+    .ghost-btn { background: none; border: none; color: var(--ink-3); border-radius: 10px;
+                 padding: 8px 10px; cursor: pointer; display: inline-flex; align-items: center;
+                 gap: 6px; font-size: 12.5px; }
+    .ghost-btn:hover { color: var(--ink); background: var(--bg-active); }
+    .ghost-btn.danger:hover { color: var(--err); }
+
+    /* ===== 卡片与表单 ===== */
+    .card { background: var(--bg-card); border: 1px solid var(--line); border-radius: 14px;
+            padding: 20px 24px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+    .card + .card { margin-top: 16px; }
+    .section-gap { margin-top: 32px; }
+    .section-title { font-family: var(--font-serif); font-size: 18px; font-weight: 600; margin: 0 0 16px; }
+    .crumb { font-size: 12.5px; color: var(--ink-3); margin: 0 0 8px; }
+    .field-label { display: block; font-size: 12.5px; color: var(--ink-2); margin: 14px 0 6px; }
+    .text-input { width: 100%; border: 1px solid var(--line); border-radius: 10px;
+                  background: var(--bg); padding: 8px 12px; font: inherit; color: var(--ink); }
+    .text-input:focus { outline: none; border-color: var(--accent); }
+    .card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .card-head .grow { flex: 1; min-width: 200px; }
+    .card-head .text-input { font-weight: 600; }
+    .badge { font-size: 12.5px; padding: 2px 10px; border-radius: 999px;
+             background: var(--accent-soft); color: var(--ink-2); flex: none; }
+    .badge.dim { background: var(--bg-active); }
+    .meta-line { font-size: 12.5px; color: var(--ink-3); margin-top: 10px; }
+    .task-brief { margin: 12px 0 0; }
+
+    /* ===== quiz 选项行（发丝线圆角行） ===== */
+    .quiz-q { font-size: 15px; font-weight: 600; margin: 16px 0 4px; }
+    .opt-row { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line);
+               border-radius: 10px; padding: 10px 14px; cursor: pointer; margin-top: 8px;
+               background: var(--bg-card); position: relative; }
+    .opt-row:hover { background: var(--bg-active); }
+    .opt-row.selected { border-color: var(--accent); background: var(--accent-soft); }
+    .opt-row input { position: absolute; opacity: 0; pointer-events: none; }
+    .opt-dot { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--ink-3); flex: none; }
+    .opt-row.selected .opt-dot { border-color: var(--accent); background: var(--accent); }
+
+    /* ===== artifact 验收复选行 ===== */
+    .check-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; cursor: pointer;
+                 position: relative; border-bottom: 1px solid var(--line); }
+    .check-row:last-of-type { border-bottom: none; }
+    .check-row input { position: absolute; opacity: 0; pointer-events: none; }
+    .check-box { width: 15px; height: 15px; border: 1px solid var(--ink-3); border-radius: 4px;
+                 flex: none; display: inline-flex; align-items: center; justify-content: center; }
+    .check-row.selected .check-box { background: var(--accent); border-color: var(--accent); }
+    .check-row.selected .check-box::after { content: "✓"; color: var(--white); font-size: 10px; }
+
+    .submit-line { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
+
+    /* ===== 判分结果 / done 横幅 ===== */
+    .result { border-radius: 10px; padding: 14px 16px; margin-top: 16px; }
+    .result.pass { background: var(--ok-soft); }
+    .result.fail { background: var(--err-soft); }
+    .result .verdict { font-weight: 600; }
+    .result.pass .verdict { color: var(--ok); }
+    .result.fail .verdict { color: var(--err); }
+    .result .evidence { margin-top: 6px; color: var(--ink-2); }
+    .result .recommend { margin-top: 6px; font-size: 12.5px; color: var(--ink-3); }
+    .done-banner { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 14px;
+                   padding: 20px 24px; text-align: center; margin-bottom: 16px; }
+    .done-banner .big { font-family: var(--font-serif); font-size: 18px; font-weight: 600; }
+    .done-banner .sub { font-size: 12.5px; color: var(--ink-2); margin-top: 6px; }
+
+    .edit-tip { color: var(--ink-3); font-size: 12.5px; margin: 0 0 24px; }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Custom</h1>
-    <div id="progress">进度 0%</div>
-  </header>
-  <nav id="nav">
-    <!-- TODO(G3-第6步): 当前阶段+任务置顶列表 -->
-    <p>任务导航（骨架占位）</p>
-  </nav>
-  <main id="main">
-    <!-- TODO(G3-第6步): 任务详情（学习目标/quiz/产出要求） -->
-    <p>任务详情（骨架占位）</p>
-  </main>
+  <div class="app">
+    <nav id="sidebar">
+      <div class="logo"><span class="b1">C</span><span class="b2">ustom</span></div>
+      <div id="nav-tree" class="nav-tree"></div>
+      <div class="sidebar-footer">
+        <button id="btn-export-side" class="ghost-btn" title="导出全量 JSON">导出</button>
+        <span class="ver">v0.1 · 数据本地存储</span>
+      </div>
+    </nav>
+    <div class="main-col">
+      <header class="topbar">
+        <h1 id="topbar-title" class="topbar-title"></h1>
+        <div class="topbar-right">
+          <div id="progress" class="progress-wrap" hidden>
+            <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+            <span id="progress-text" class="progress-text">0%</span>
+          </div>
+          <button id="btn-export" class="ghost-btn" title="导出全量 JSON">导出</button>
+        </div>
+      </header>
+      <main id="main"></main>
+    </div>
+  </div>
   <script src="app.js"></script>
 </body>
 </html>

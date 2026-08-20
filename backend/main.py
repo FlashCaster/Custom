@@ -1,17 +1,21 @@
-"""FastAPI 入口：路由 goals/paths/tasks/attempts/export。
+"""FastAPI 入口：路由 goals/paths/tasks/attempts/export + 前端静态伺服。
 
 G3 第 5 步：8 路由串通 store/planner/checker；统一错误映射（422/404/400/502/503/500）；
 lifespan 启动时 store.init_db(store.DB_PATH)（补 G2 TODO，DB 位置可测试 monkeypatch）；
 get_llm_client 工厂：DEEPSEEK_API_KEY 环境变量（无 key → 503），懒 import openai（无 key 不崩）。
+G3 第 6 步：PUT /paths/{id}（候选修改全量替换，仅 draft，409 状态门）+ POST /paths/{id}/complete
+（幂等置 done）+ StaticFiles mount "/"（html=True，GET / → index.html；目录取 __file__ 相对，免 CWD 依赖）。
 """
 from __future__ import annotations
 
 import os
 import sqlite3
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend import checker, planner, store
@@ -76,6 +80,14 @@ class AttemptCreate(BaseModel):
     checklist: list[bool] | None = None
 
 
+class PathUpdate(BaseModel):
+    """PUT 全量替换入参：深度校验全部交给 planner.validate（400），此处只守顶层类型（422）。"""
+    model_config = ConfigDict(strict=True)
+
+    title: str
+    stages: list
+
+
 # ---------- LLM client 工厂 ----------
 
 def get_llm_client():
@@ -136,6 +148,30 @@ def activate_path_route(path_id: int) -> dict:
     return store.get_path(path_id)
 
 
+@app.put("/paths/{path_id}")
+def update_path_route(path_id: int, body: PathUpdate) -> dict:
+    """候选修改落地：body {title, stages} 全量替换。仅 draft 可改（active/done → 409）；
+    复用 planner.validate_candidate_path 全部校验（坏结构 → 400）；store.update_path 原子事务。"""
+    path = store.get_path(path_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"path {path_id} 不存在")
+    if path["status"] != "draft":
+        raise HTTPException(status_code=409,
+                            detail=f"path {path_id} 状态为 {path['status']}，仅 draft 可修改")
+    candidate = planner.validate_candidate_path({"title": body.title, "stages": body.stages})
+    store.update_path(path_id, candidate["title"], candidate["stages"])
+    return store.get_path(path_id)
+
+
+@app.post("/paths/{path_id}/complete")
+def complete_path_route(path_id: int) -> dict:
+    """全部完成置 done（幂等，任意状态可直接 complete，重复调用 200）。"""
+    if store.get_path(path_id) is None:
+        raise HTTPException(status_code=404, detail=f"path {path_id} 不存在")
+    store.set_path_status(path_id, "done")
+    return store.get_path(path_id)
+
+
 @app.get("/paths/{path_id}")
 def get_path_route(path_id: int) -> dict:
     path = store.get_path(path_id)
@@ -192,6 +228,12 @@ def attempt_route(task_id: int, body: AttemptCreate) -> dict:
 def export_route() -> dict:
     """全量嵌套导出：goals→paths→stages→tasks→attempts（数据归用户）。"""
     return store.export_all()
+
+
+# ---------- 静态伺服（G3-6：挂在全部 API 路由之后，先匹配路由后落 mount） ----------
+
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/", StaticFiles(directory=_FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":
