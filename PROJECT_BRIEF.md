@@ -22,8 +22,11 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 | docs/G3-3-checker计划.md | G3 第 3 步可执行计划（判分双模语义 + 2.4 用例表 + TDD 步骤） |
 | docs/G3-4-planner计划.md | G3 第 4 步可执行计划（LLM 候选生成 + 严格校验 + mock 测试策略） |
 | docs/G3-5-api路由计划.md | G3 第 5 步可执行计划（8 路由串通 + 错误映射 + curl 冒烟 + TestClient TDD） |
-| docs/G3-6-前端计划.md | G3 第 6 步可执行计划（前端三区 + 候选编辑 PUT + complete + 静态伺服 + DeepTutor 风格迭代 v2 + K1-K8 走查） |
+| docs/G3-6-前端计划.md | G3 第 6 步可执行计划（前端三区 + 候选编辑 PUT + complete + 静态伺服 + DeepTutor 风格迭代 v2 + K1-K8 走查）——实现完成，尾部走查吸收进 G3-7 步 E |
+| docs/flow-v2-design.md | 产品流程 v2 定稿：完善流程图 + 三层状态图（path/stage/task，Mermaid 可编辑）+ D1-D6 裁决记录 |
+| docs/G3-7-flowv2计划.md | G3 第 7 步实施计划：水平测试/增量生成/chat 指导/LLM 审核+用户终裁/文本+附件上传/自动沉淀，步 A-E TDD |
 | docs/复盘日志.md | 每次会话 3 行复盘（坑归档进本档案已知坑） |
+| scripts/seed_demo.py | dev-only 造数脚本（无 key 联调，直接 store 建 demo goal/path/attempts） |
 | backend/main.py | FastAPI 路由：goals/paths/tasks/attempts/export |
 | backend/planner.py | DeepSeek 生成候选路径（含难度标注）→ 严格 JSON 校验 → draft |
 | backend/checker.py | quiz 判分 + 难度推荐规则 + 验收清单确认 |
@@ -54,6 +57,8 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 - pwsh 把含双引号的 JSON 作参数传给 curl.exe 时引号被剥（服务端报 422 JSON decode error）→ curl 冒烟用 `--data-binary "@文件"` 传 body（workspace 内临时文件），勿用 `-d $变量` 内联
 - starlette 1.6 的 TestClient 对 httpx 报弃用警告（建议 httpx2）→ 仅警告，功能正常；升级依赖时再跟进
 - DSH 沙箱拦截 git→子进程的管道通信（credential helper 无论 GCM/sh/cmd/powershell 均返回空；pager 同样无输出）→ 沙箱内 `git push` 走 credential helper 必失败；绕行：`data/git-push.ps1`（不入库）从 GCM 读 github.com 凭证 → URL 内嵌 → git push（密钥只在进程内传递，不打印不落盘）；推给裸 URL 不更新本地 origin/main 引用，事后 `git fetch origin main` 同步 status
+- pwsh 向 `python -c` / here-string 传带引号代码时引号被剥（SyntaxError，与 curl 剥引号同族）→ 改写临时 .py 文件执行、用后删，勿用 `-c` 内联带引号代码
+- 浏览器自动请求 /favicon.ico，静态伺服无图标时控制台报 404（K1「控制台无报错」红线）→ index.html 声明内联 SVG data-URI favicon（零额外文件），已修复
 
 ## 协作规则（用户已定，长期有效）
 
@@ -69,7 +74,16 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 | 主线：G1 方案设计 | 已完成 | 方案落盘 docs/G1-方案.md（v2） | 无 |
 | 主线：G3 第4步 planner | 已完成 | test_planner.py 18 用例 + 全量 56 绿 + 示例候选渲染已终审；SDK 验证：PyPI deepseek 1.0.0 系第三方 deskpai 非官方 → openai SDK + base_url（client 注入式） | 无 |
 | 主线：G3 第5步 API 路由 | 已完成 | test_api.py 18 用例 + 全量 77 绿；curl 冒烟（health/goals/export 通、无 key generate→503）已获用户终审确认并推送 | 无 |
-| 支线：前端骨架 | 决策已确认，待开工 | 按 docs/G3-6-前端计划.md 执行（三区 + fetch 联调 + 候选编辑 PUT + 风格迭代 v2） | 等开工指令 |
+| 主线：G3 第6步前端 | 实现完成，走查吸收 | 98 绿 + curl 冒烟全过；尾部走查（K1 复验/K4/K6/K7/K8）吸收进 G3-7 步 E 重走 | 无 |
+| 主线：flow-v2 设计 | 已定稿 | D1-D6 裁决落 docs/flow-v2-design.md（可跳过/LLM建议+用户终裁/文本+附件/轻确认/按task持久/自动沉淀） | 无 |
+| 主线：G3 第7步 flow-v2 实施 | 计划落盘，待开工令 | 按 docs/G3-7-flowv2计划.md 步 A-E 执行；新会话先裁决交接备忘三问 | 等开工令 |
+
+## 交接备忘（2026-08-20 · flow-v2 移交新会话）
+
+- **运行时状态**：uvicorn 系上一会话后台 job，会话结束即失效；新会话在 Custom/ 根目录一条命令重启：`python -m uvicorn backend.main:app --port 8000`。data/custom.db 含 demo 数据（goal#2 / path#1 active，内含 K6 XSS 探针任务#7，清理时机见开放问②）。
+- **未提交**：工作区 10 项变更（G3-6 实现 7 项 + flow-v2/G3-7 文档 2 项 + seed_demo），推送节奏待裁决（开放问③）。
+- **开放问（新会话先裁决再动手）**：① G3-6 尾部走查（K1 复验/K4/K6/K7/K8）补做还是吸收进 G3-7 步 E 重走？推荐吸收（前端将按 v2 重写）。② K6 探针任务何时清理？推荐步 E 造数前一并清。③ 推送节奏：G3-6+文档先推，还是步 E 后一起推？推荐文档与 G3-6 先推（代码已 98 绿验证）。
+- **指导计划（新会话按序执行）**：1. 读 PROJECT_BRIEF + docs/flow-v2-design.md + docs/G3-7-flowv2计划.md；2. 裁决开放问①②③；3. 等开工令后入 G3-7 步 A（schema+store TDD；开工即重启 uvicorn，schema 变更不迁移、重建 demo 库）；4. 步 A→E 严格顺序、每步一推送、TDD 红→绿；5. 步 E 出口须用户可视化审核（先审后拍板）；6. dogfooding（真实 key 全闭环，含 K5 候选编辑走查）顺延至 flow-v2 完成后。
 
 ## 完成定义（验收 + 安全双清单）
 
