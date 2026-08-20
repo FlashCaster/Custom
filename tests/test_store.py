@@ -29,6 +29,22 @@
 | U04 | G3-6 攻击 | 不存在 path / title 空白 / stages 非 list | ValueError |
 | U05 | G3-6 攻击-特殊字符 | title 注入串 + emoji + 引号 | 往返一致（参数化） |
 | U06 | G3-6 边界/职责 | 空 stages / active 状态更新 | store 层允许（清树/不查 status）；非空门在 API 层 |
+| P01 | G3-7 正常-最小 | placement create/get | questions 反序列化；answers=None、graded_at=None（未交 NULL） |
+| P02 | G3-7 正常-典型 | submit answers | answers+graded_at 落库往返 |
+| P03 | G3-7 攻击-重复 | 已提交再 submit | ValueError |
+| P04 | G3-7 攻击-非法值 | questions 空/非 list/元素非 dict；answers 非 list/含非 int/含 bool/空；不存在 id submit | ValueError；不存在 get → None |
+| P05 | G3-7 外键+级联 | 不存在 goal → IntegrityError；删 goal → placement 消失 | |
+| V01 | G3-7 正常 | chat 消息往返 | 按 id 序；按 task 隔离；ts 非空 |
+| V02 | G3-7 攻击 | 非法 role / 空白 content / 非 str content / 孤儿 task | ValueError / IntegrityError |
+| V03 | G3-7 级联 | 删 path → conversations 全清零残留 | |
+| S01 | G3-7 默认值 | stage 新列默认 | status='pending'、objective=''、summary=None；get_path 含三字段 |
+| S02 | G3-7 往返 | create/update_path 带 objective+status | 嵌套落库与全量替换均往返 |
+| S03 | G3-7 攻击 | set_stage_status 非法值/不存在；绕过 Python 直写坏 status | ValueError ×2 + DB CHECK IntegrityError |
+| S04 | G3-7 往返 | set_stage_summary 写入/刷新/空白拒/不存在拒 | |
+| AT01 | G3-7 往返 | attempts 五新列（submission/file_name/file_path/llm_review/forced） | 含 forced=1 强行通过 |
+| AT02 | G3-7 默认值 | 省略新参 | ''/None/None/''/0，旧调用零破坏 |
+| AT03 | G3-7 攻击 | forced bool/2、submission 非 str、file_name 非 str | ValueError |
+| C03 | G3-7 并发 | 10 线程 add_message | 10 条全入库无丢失 |
 """
 from __future__ import annotations
 
@@ -98,7 +114,8 @@ def test_init_db_idempotent_and_foreign_keys_enabled(db):
     conn = store.get_conn(db)
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"goals", "paths", "stages", "tasks", "attempts"} <= tables
+    assert {"goals", "paths", "stages", "tasks", "attempts",
+            "placement_tests", "conversations"} <= tables
     conn.close()
 
 
@@ -578,3 +595,284 @@ def test_update_path_empty_stages_and_status_not_gated(db):
     assert after["status"] == "active"
     for t in tasks:
         assert store.get_task(t["id"], path=db) is None
+
+
+# ---------- G3-7 步A 新增：placement_tests（水平测试卷） ----------
+
+def _mk_questions(n=3):
+    """水平测试题组（复用 quiz 结构）。"""
+    return [_quiz(q=f"水平测试第{i + 1}题？", answer=i % 3) for i in range(n)]
+
+
+def test_placement_create_get_unsubmitted(db):
+    """P01 正常-最小：create/get 往返；未提交时 answers=None、graded_at=None。"""
+    gid = _mk_goal(db)
+    ptid = store.create_placement_test(gid, _mk_questions(), path=db)
+    pt = store.get_placement_test(ptid, path=db)
+    assert pt["goal_id"] == gid
+    assert len(pt["questions"]) == 3
+    assert isinstance(pt["questions"][0], dict)
+    assert pt["questions"][0]["q"] == "水平测试第1题？"
+    assert pt["answers"] is None
+    assert pt["graded_at"] is None
+    assert pt["created_at"]
+
+
+def test_placement_submit_roundtrip(db):
+    """P02 正常-典型：submit → answers + graded_at 落库往返。"""
+    gid = _mk_goal(db)
+    ptid = store.create_placement_test(gid, _mk_questions(4), path=db)
+    store.submit_placement_test(ptid, [0, 1, 2, 0], path=db)
+    pt = store.get_placement_test(ptid, path=db)
+    assert pt["answers"] == [0, 1, 2, 0]
+    assert pt["graded_at"]
+
+
+def test_placement_double_submit_rejected(db):
+    """P03 攻击-重复：已提交的卷再 submit → ValueError。"""
+    gid = _mk_goal(db)
+    ptid = store.create_placement_test(gid, _mk_questions(), path=db)
+    store.submit_placement_test(ptid, [0, 1, 2], path=db)
+    with pytest.raises(ValueError):
+        store.submit_placement_test(ptid, [1, 1, 1], path=db)
+
+
+def test_placement_invalid_inputs_rejected(db):
+    """P04 攻击-非法值：questions/answers 各形态坏输入全拒；不存在 id → ValueError / get → None。"""
+    gid = _mk_goal(db)
+    with pytest.raises(ValueError):
+        store.create_placement_test(gid, [], path=db)          # 空卷
+    with pytest.raises(ValueError):
+        store.create_placement_test(gid, "not a list", path=db)  # 非 list
+    with pytest.raises(ValueError):
+        store.create_placement_test(gid, [{"q": "ok"}, "bad"], path=db)  # 元素非 dict
+    ptid = store.create_placement_test(gid, _mk_questions(), path=db)
+    with pytest.raises(ValueError):
+        store.submit_placement_test(ptid, "0,1,2", path=db)    # answers 非 list
+    with pytest.raises(ValueError):
+        store.submit_placement_test(ptid, [0, "1", 2], path=db)  # 含非 int
+    with pytest.raises(ValueError):
+        store.submit_placement_test(ptid, [True, 0, 1], path=db)  # bool 不是 int
+    with pytest.raises(ValueError):
+        store.submit_placement_test(ptid, [], path=db)          # 空答案
+    with pytest.raises(ValueError):
+        store.submit_placement_test(999, [0], path=db)          # 不存在的卷
+    assert store.get_placement_test(999, path=db) is None
+
+
+def test_placement_fk_and_cascade(db):
+    """P05 外键+级联：孤儿 goal → IntegrityError；删 goal → placement 级联消失。"""
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_placement_test(999, _mk_questions(), path=db)
+    gid = _mk_goal(db)
+    ptid = store.create_placement_test(gid, _mk_questions(), path=db)
+    with store.get_conn(db) as conn:
+        conn.execute("DELETE FROM goals WHERE id=?", (gid,))
+        conn.commit()
+    assert store.get_placement_test(ptid, path=db) is None
+
+
+# ---------- G3-7 步A 新增：conversations（chat 按 task 持久化） ----------
+
+def test_conversations_roundtrip_ordered(db):
+    """V01 正常：消息往返、按 id 序、按 task 隔离、ts 非空。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    tid = tasks[0]["id"]
+    m1 = store.add_message(tid, "user", "这题怎么入手？", path=db)
+    m2 = store.add_message(tid, "assistant", "先看任务 brief，再拆知识点。", path=db)
+    msgs = store.list_messages(tid, path=db)
+    assert [m["id"] for m in msgs] == [m1, m2]
+    assert msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "这题怎么入手？"
+    assert msgs[0]["ts"]
+    assert msgs[1]["role"] == "assistant"
+    assert store.list_messages(tasks[1]["id"], path=db) == []  # 其他 task 隔离
+
+
+def test_conversations_invalid_inputs(db):
+    """V02 攻击：非法 role / 空白 content / 非 str content → ValueError；孤儿 task → IntegrityError。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    tid = tasks[0]["id"]
+    with pytest.raises(ValueError):
+        store.add_message(tid, "system", "x", path=db)
+    with pytest.raises(ValueError):
+        store.add_message(tid, "user", "   ", path=db)
+    with pytest.raises(ValueError):
+        store.add_message(tid, "user", 123, path=db)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.add_message(999, "user", "orphan", path=db)
+
+
+def test_conversations_cascade_on_path_delete(db):
+    """V03 级联：删 path → stages→tasks→conversations 全清、零残留。"""
+    gid = _mk_goal(db)
+    pid, tasks = _mk_full_path(db, gid)
+    for t in tasks:
+        store.add_message(t["id"], "user", "hi", path=db)
+        store.add_message(t["id"], "assistant", "hello", path=db)
+    with store.get_conn(db) as conn:
+        conn.execute("DELETE FROM paths WHERE id=?", (pid,))
+        conn.commit()
+    for t in tasks:
+        assert store.list_messages(t["id"], path=db) == []
+    conn = store.get_conn(db)
+    assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+    conn.close()
+
+
+def test_concurrent_add_message_no_lost_writes(db):
+    """C03 并发：10 线程写同一 task 的消息，无丢失。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    tid = tasks[0]["id"]
+    n = 10
+    barrier = threading.Barrier(n)
+    errors = []
+
+    def worker(i):
+        try:
+            barrier.wait()
+            store.add_message(tid, "user", f"msg-{i}", path=db)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    msgs = store.list_messages(tid, path=db)
+    assert len(msgs) == n
+    assert {m["content"] for m in msgs} == {f"msg-{i}" for i in range(n)}
+
+
+# ---------- G3-7 步A 新增：stages 增列（status/objective/summary） ----------
+
+def test_stage_new_columns_defaults(db):
+    """S01 默认值：create_path 落库 stage 默认 pending/''/None；get_path 输出含三新字段。"""
+    gid = _mk_goal(db)
+    pid, _ = _mk_full_path(db, gid)
+    for s in store.get_path(pid, path=db)["stages"]:
+        assert s["status"] == "pending"
+        assert s["objective"] == ""
+        assert s["summary"] is None
+
+
+def test_stage_objective_status_in_create_and_update(db):
+    """S02 往返：create_path / update_path 嵌套带 objective+status，均往返。"""
+    gid = _mk_goal(db)
+    stages = [
+        {"title": "S1", "objective": "掌握基础", "status": "review", "tasks": []},
+        {"title": "S2", "objective": "进阶应用", "tasks": []},  # status 缺省
+    ]
+    pid = store.create_path(gid, "p", stages=stages, path=db)
+    got = store.get_path(pid, path=db)["stages"]
+    assert (got[0]["objective"], got[0]["status"]) == ("掌握基础", "review")
+    assert (got[1]["objective"], got[1]["status"]) == ("进阶应用", "pending")
+    # update_path 全量替换同样支持
+    store.update_path(pid, "p2", [
+        {"title": "N1", "objective": "新目标", "status": "learning", "tasks": []},
+    ], path=db)
+    s = store.get_path(pid, path=db)["stages"][0]
+    assert (s["objective"], s["status"]) == ("新目标", "learning")
+
+
+def test_stage_invalid_status_rejected(db):
+    """S03 攻击：create 嵌套坏 status / set_stage_status 非法值与不存在 → ValueError；
+    绕过 Python 直写坏 status → DB CHECK 兜底 IntegrityError。"""
+    gid = _mk_goal(db)
+    with pytest.raises(ValueError):
+        store.create_path(gid, "p", stages=[{"title": "s", "status": "bogus"}], path=db)
+    _, tasks = _mk_full_path(db, gid)
+    sid = tasks[0]["stage_id"]
+    with pytest.raises(ValueError):
+        store.set_stage_status(sid, "banana", path=db)
+    with pytest.raises(ValueError):
+        store.set_stage_status(999, "done", path=db)
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys=ON")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE stages SET status='evil' WHERE id=?", (sid,))
+    conn.close()
+
+
+def test_set_stage_status_all_valid_states(db):
+    """S03 正常面：四态皆可设，最终态可回读。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    sid = tasks[0]["stage_id"]
+    for st in ("review", "learning", "done", "pending"):
+        store.set_stage_status(sid, st, path=db)
+    path = store.list_paths(gid, path=db)[0]
+    stage = next(s for s in path["stages"] if s["id"] == sid)
+    assert stage["status"] == "pending"
+
+
+def test_stage_summary_roundtrip(db):
+    """S04：summary 写入/刷新往返；空白与不存在拒。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    sid = tasks[0]["stage_id"]
+    store.set_stage_summary(sid, "本阶段完成 2 任务，quiz 全过", path=db)
+    path = store.list_paths(gid, path=db)[0]
+    stage = next(s for s in path["stages"] if s["id"] == sid)
+    assert stage["summary"] == "本阶段完成 2 任务，quiz 全过"
+    store.set_stage_summary(sid, "重新沉淀", path=db)  # 可刷新
+    stage = next(s for s in store.list_paths(gid, path=db)[0]["stages"] if s["id"] == sid)
+    assert stage["summary"] == "重新沉淀"
+    with pytest.raises(ValueError):
+        store.set_stage_summary(sid, "   ", path=db)
+    with pytest.raises(ValueError):
+        store.set_stage_summary(999, "x", path=db)
+
+
+# ---------- G3-7 步A 新增：attempts 增列（submission/附件元数据/llm_review/forced） ----------
+
+def test_attempts_new_columns_roundtrip(db):
+    """AT01 往返：五新列写入回读；forced=1 记录用户终裁。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    art = next(t for t in tasks if t["kind"] == "artifact")
+    store.record_attempt(art["id"], 2, "pass", "LLM 审核通过",
+                         submission="完成 RAG 小样并附说明", file_name="报告.md",
+                         file_path="data/uploads/uuid-x.md",
+                         llm_review='{"verdict": "pass"}', forced=0, path=db)
+    a = store.get_attempts(art["id"], path=db)[0]
+    assert a["submission"] == "完成 RAG 小样并附说明"
+    assert a["file_name"] == "报告.md"
+    assert a["file_path"] == "data/uploads/uuid-x.md"
+    assert a["llm_review"] == '{"verdict": "pass"}'
+    assert a["forced"] == 0
+    store.record_attempt(art["id"], 2, "pass", "用户终裁强行通过", forced=1, path=db)
+    assert store.get_attempts(art["id"], path=db)[1]["forced"] == 1
+
+
+def test_attempts_new_columns_defaults(db):
+    """AT02 默认值：省略新参 → ''/None/None/''/0（旧调用零破坏）。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    store.record_attempt(tasks[0]["id"], 1, "pass", "ev", path=db)
+    a = store.get_attempts(tasks[0]["id"], path=db)[0]
+    assert a["submission"] == ""
+    assert a["file_name"] is None
+    assert a["file_path"] is None
+    assert a["llm_review"] == ""
+    assert a["forced"] == 0
+
+
+def test_attempts_new_columns_invalid_rejected(db):
+    """AT03 攻击：forced bool/越界、submission/file_name 非 str → ValueError。"""
+    gid = _mk_goal(db)
+    _, tasks = _mk_full_path(db, gid)
+    tid = tasks[0]["id"]
+    with pytest.raises(ValueError):
+        store.record_attempt(tid, 1, "pass", forced=True, path=db)
+    with pytest.raises(ValueError):
+        store.record_attempt(tid, 1, "pass", forced=2, path=db)
+    with pytest.raises(ValueError):
+        store.record_attempt(tid, 1, "pass", submission=123, path=db)
+    with pytest.raises(ValueError):
+        store.record_attempt(tid, 1, "pass", file_name=88, path=db)
