@@ -22,6 +22,7 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 | docs/G3-3-checker计划.md | G3 第 3 步可执行计划（判分双模语义 + 2.4 用例表 + TDD 步骤） |
 | docs/G3-4-planner计划.md | G3 第 4 步可执行计划（LLM 候选生成 + 严格校验 + mock 测试策略） |
 | docs/G3-5-api路由计划.md | G3 第 5 步可执行计划（8 路由串通 + 错误映射 + curl 冒烟 + TestClient TDD） |
+| docs/G3-6-前端计划.md | G3 第 6 步可执行计划（前端三区 + 候选编辑 PUT + complete + 静态伺服 + K1-K7 走查） |
 | docs/复盘日志.md | 每次会话 3 行复盘（坑归档进本档案已知坑） |
 | backend/main.py | FastAPI 路由：goals/paths/tasks/attempts/export |
 | backend/planner.py | DeepSeek 生成候选路径（含难度标注）→ 严格 JSON 校验 → draft |
@@ -50,6 +51,8 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 - DSH 沙箱 workspace-write 拦截 pip/临时目录写入 → 依赖安装与清理临时目录需升级 danger-full-access；pip 残留临时目录可能被标记不可访问，pytest 用 `pytest.ini` 的 `testpaths=tests` 限定扫描范围
 - DSH 沙箱会把 `tempfile.mkdtemp` 创建的目录标记为不可访问（scandir/写入/rmtree 均 PermissionError）→ pytest 的 `tmp_path` fixture 不可用；测试改用 workspace 内普通目录（`os.makedirs` + uuid 自建），并在 `pytest.ini` 加 `-p no:cacheprovider`（cacheprovider 写临时文件同样被拦）
 - pwsh 跑 pytest/uvicorn 时控制台中文显示乱码（Windows 代码页）→ **纯显示问题**，不影响文件与判定；以测试结果数字为准，勿当编码 bug 排查
+- pwsh 把含双引号的 JSON 作参数传给 curl.exe 时引号被剥（服务端报 422 JSON decode error）→ curl 冒烟用 `--data-binary "@文件"` 传 body（workspace 内临时文件），勿用 `-d $变量` 内联
+- starlette 1.6 的 TestClient 对 httpx 报弃用警告（建议 httpx2）→ 仅警告，功能正常；升级依赖时再跟进
 - DSH 沙箱拦截 git→子进程的管道通信（credential helper 无论 GCM/sh/cmd/powershell 均返回空；pager 同样无输出）→ 沙箱内 `git push` 走 credential helper 必失败；绕行：`data/git-push.ps1`（不入库）从 GCM 读 github.com 凭证 → URL 内嵌 → git push（密钥只在进程内传递，不打印不落盘）；推给裸 URL 不更新本地 origin/main 引用，事后 `git fetch origin main` 同步 status
 
 ## 协作规则（用户已定，长期有效）
@@ -65,8 +68,8 @@ v0 聚焦场景：**AI 工程师所需技能知识点**（LLM 基础 / 提示工
 | 主线：G3 第3步 checker | 已完成 | test_checker.py 15 用例 + 全量 38 绿 | 无 |
 | 主线：G1 方案设计 | 已完成 | 方案落盘 docs/G1-方案.md（v2） | 无 |
 | 主线：G3 第4步 planner | 已完成 | test_planner.py 18 用例 + 全量 56 绿 + 示例候选渲染已终审；SDK 验证：PyPI deepseek 1.0.0 系第三方 deskpai 非官方 → openai SDK + base_url（client 注入式） | 无 |
-| 主线：G3 第5步 API 路由 | 计划已落盘（待用户确认） | 按 docs/G3-5-api路由计划.md 写 test_api.py（TDD，TestClient + fake client） | 等用户确认计划 |
-| 支线：前端骨架 | 未开始 | 三区布局 + fetch 联调（第 6 步） | 等 API 路由 |
+| 主线：G3 第5步 API 路由 | 已完成 | test_api.py 18 用例 + 全量 77 绿；curl 冒烟（health/goals/export 通、无 key generate→503）已获用户终审确认并推送 | 无 |
+| 支线：前端骨架 | 计划已落盘（待用户确认） | 按 docs/G3-6-前端计划.md 执行（三区 + fetch 联调 + 候选编辑 PUT） | 等用户确认计划 |
 
 ## 完成定义（验收 + 安全双清单）
 

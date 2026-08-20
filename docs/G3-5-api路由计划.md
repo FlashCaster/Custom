@@ -1,7 +1,7 @@
 # G3 第 5 步计划：API 路由（goals/paths/tasks/attempts/export 串通 + curl 冒烟）
 
 - 日期：2026-08-20
-- 状态：待用户确认（2026-08-20 落盘，随 G3-4 终审交付；确认后待开工指令执行）
+- 状态：已执行完毕，待用户终审确认（2026-08-20：test_api.py 18 用例 + 全量 77 绿 + curl 冒烟通过）
 - 阶段：全模式 G3 小步实现（TDD）
 - 输入：PROJECT_BRIEF.md + docs/G1-方案.md §5 §6 + backend/main.py（G2 stub）+ backend/store.py / checker.py / planner.py 现有契约 + ADR-2026-08-20-checker判分契约
 
