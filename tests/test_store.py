@@ -20,6 +20,7 @@
 | A10 | 组合2 | 嵌套+特殊字符+空 acceptance+级联 | 全清、无残留 |
 | A11 | 攻击-缺失字段(外键) | 不存在的 goal/stage/task 父 id | IntegrityError |
 | A12 | 攻击-异常格式(类型) | statement 非 str / interests 非 list | ValueError |
+| T05 | 正常-store新增 | list_paths 按 goal 过滤 / export_all 空库与满库 | 结构正确 |
 | C01 | 并发 | 12 线程写 attempts | 12 条全部入库、无丢失 |
 | C02 | 并发 | 8 线程建 goal | id 唯一、数量正确 |
 """
@@ -400,3 +401,58 @@ def test_concurrent_create_goal_unique_ids(db):
         t.join()
     assert len(set(ids)) == n
     assert len(store.list_goals(path=db)) == n
+
+
+# ---------- G3-第5步新增：list_paths / export_all ----------
+
+def test_list_paths_all_and_filter_by_goal(db):
+    """T05 list_paths：无参返回全部（嵌套完整树，同 get_path 结构）；按 goal 过滤只回本 goal。"""
+    g1 = _mk_goal(db, "学 A")
+    g2 = _mk_goal(db, "学 B")
+    p1, _ = _mk_full_path(db, g1)
+    p2, _ = _mk_full_path(db, g2)
+    all_paths = store.list_paths(path=db)
+    assert {p["id"] for p in all_paths} == {p1, p2}
+    for p in all_paths:
+        assert set(p) == {"id", "goal_id", "title", "status", "stages"}
+        assert p["stages"] and p["stages"][0]["tasks"]
+    mine = store.list_paths(g1, path=db)
+    assert [p["id"] for p in mine] == [p1]
+    assert [s["title"] for s in mine[0]["stages"]] == ["阶段1", "阶段2"]
+    assert store.list_paths(999, path=db) == []  # 不存在的 goal → 空
+
+
+def test_export_all_empty_db(db):
+    """T05 export_all 空库：goals 为空列表。"""
+    assert store.export_all(path=db) == {"goals": []}
+
+
+def test_export_all_nested_with_attempts(db):
+    """T05 export_all 满库：goals→paths→stages→tasks→attempts 嵌套，attempts 按 task 挂载。"""
+    g1 = _mk_goal(db, "学 A", ["RAG"])
+    g2 = _mk_goal(db, "学 B")
+    p1, tasks1 = _mk_full_path(db, g1)
+    store.record_attempt(tasks1[0]["id"], 1, "pass", "ok1", path=db)
+    store.record_attempt(tasks1[0]["id"], 0, "fail", "ok2", path=db)
+    p2, tasks2 = _mk_full_path(db, g2)
+    store.record_attempt(tasks2[-1]["id"], 3, "pass", "ok3", path=db)
+    g3 = _mk_goal(db, "学 C")  # 无 path 的 goal
+
+    dump = store.export_all(path=db)
+    assert [g["id"] for g in dump["goals"]] == [g1, g2, g3]
+
+    g1d = dump["goals"][0]
+    assert g1d["statement"] == "学 A"
+    assert g1d["interests"] == ["RAG"]
+    assert [p["id"] for p in g1d["paths"]] == [p1]
+    tasks = [t for s in g1d["paths"][0]["stages"] for t in s["tasks"]]
+    assert [a["result"] for a in tasks[0]["attempts"]] == ["pass", "fail"]
+    assert tasks[0]["attempts"][0]["evidence"] == "ok1"
+    assert tasks[-1]["attempts"] == []  # 无 attempts 的任务也有空列表
+
+    g2d = dump["goals"][1]
+    assert [p["id"] for p in g2d["paths"]] == [p2]
+    g2_tasks = [t for s in g2d["paths"][0]["stages"] for t in s["tasks"]]
+    assert [a["result"] for a in g2_tasks[-1]["attempts"]] == ["pass"]
+
+    assert dump["goals"][2]["paths"] == []  # 无 path 的 goal

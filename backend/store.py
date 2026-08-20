@@ -276,6 +276,18 @@ def get_task(task_id: int, path: Path | None = None) -> dict | None:
     return _task_to_dict(row) if row else None
 
 
+def list_paths(goal_id: int | None = None, path: Path | None = None) -> list[dict]:
+    """列出路径（嵌套完整树，结构与 get_path 一致）；goal_id 给定则只回该 goal 的路径。"""
+    with _conn(path) as conn:
+        if goal_id is None:
+            rows = conn.execute("SELECT id FROM paths ORDER BY id").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id FROM paths WHERE goal_id=? ORDER BY id", (goal_id,)
+            ).fetchall()
+    return [get_path(r["id"], path) for r in rows]
+
+
 def get_stage_tasks(stage_id: int, path: Path | None = None) -> list[dict]:
     with _conn(path) as conn:
         rows = conn.execute("SELECT * FROM tasks WHERE stage_id=? ORDER BY id", (stage_id,)).fetchall()
@@ -302,3 +314,18 @@ def get_attempts(task_id: int, path: Path | None = None) -> list[dict]:
     with _conn(path) as conn:
         rows = conn.execute("SELECT * FROM attempts WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def export_all(path: Path | None = None) -> dict:
+    """全量嵌套导出：goals→paths→stages→tasks→attempts（attempts 按 task 挂载）。"""
+    goals = []
+    for goal in list_goals(path):
+        entry = dict(goal)
+        entry["paths"] = []
+        for p in list_paths(goal["id"], path):
+            for st in p["stages"]:
+                for t in st["tasks"]:
+                    t["attempts"] = get_attempts(t["id"], path)
+            entry["paths"].append(p)
+        goals.append(entry)
+    return {"goals": goals}
