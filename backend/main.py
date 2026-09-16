@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend import checker, planner, prep, store
+from backend import checker, lesson_plans, planner, prep, store
 
 
 @asynccontextmanager
@@ -89,7 +89,7 @@ class PathUpdate(BaseModel):
 
 
 class LessonPlanExampleUpdate(BaseModel):
-    """示例备课稿可整体保存；活动字段由 store 做领域校验。"""
+    """示例备课稿可整体保存；活动字段由备课服务校验。"""
     model_config = ConfigDict(strict=True)
 
     title: str
@@ -234,9 +234,7 @@ def choose_reference_statement_route(student_id: int, statement_id: int) -> dict
     return prep.choose_statement(student_id, statement_id)
 
 def _get_lesson_plan_example_or_404(example_id: str) -> dict:
-    if example_id == "default":
-        return store.get_or_create_default_lesson_plan_example()
-    example = store.get_lesson_plan_example(example_id)
+    example = lesson_plans.teacher_manuscript(example_id)
     if example is None:
         raise HTTPException(status_code=404, detail=f"示例备课稿 {example_id} 不存在")
     return example
@@ -254,13 +252,15 @@ def get_teacher_manuscript_route(example_id: str) -> dict:
 
 @app.get("/lesson-plan-examples/{example_id}/student-task-page")
 def get_student_task_page_route(example_id: str) -> dict:
-    return store.lesson_plan_student_task_page(_get_lesson_plan_example_or_404(example_id))
+    student_page = lesson_plans.student_task_page(example_id)
+    if student_page is None:
+        raise HTTPException(status_code=404, detail=f"示例备课稿 {example_id} 不存在")
+    return student_page
 
 
 @app.put("/lesson-plan-examples/{example_id}")
 def update_lesson_plan_example_route(example_id: str, body: LessonPlanExampleUpdate) -> dict:
-    _get_lesson_plan_example_or_404(example_id)
-    updated = store.update_lesson_plan_example(example_id, body.title, body.activities)
+    updated = lesson_plans.update_example(example_id, body.title, body.activities)
     if updated is None:
         raise HTTPException(status_code=404, detail=f"示例备课稿 {example_id} 不存在")
     return updated
