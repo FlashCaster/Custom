@@ -85,12 +85,66 @@ CREATE TABLE IF NOT EXISTS lesson_plan_examples (
     activities TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS students (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    grade TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    observed_errors TEXT NOT NULL,
+    independent_tasks TEXT NOT NULL,
+    school_progress_status TEXT NOT NULL CHECK (school_progress_status IN ('known', 'unknown')),
+    school_progress TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reference_materials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    file_identifier TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('file', 'pasted')),
+    selected_pages TEXT NOT NULL,
+    usage_scope TEXT NOT NULL,
+    read_pages TEXT NOT NULL,
+    unread_pages TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reference_statements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    material_id INTEGER NOT NULL REFERENCES reference_materials(id) ON DELETE CASCADE,
+    topic TEXT NOT NULL,
+    text TEXT NOT NULL,
+    page INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reference_citations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    material_id INTEGER NOT NULL REFERENCES reference_materials(id) ON DELETE CASCADE,
+    page INTEGER NOT NULL,
+    locator TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS material_selections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    material_id INTEGER NOT NULL REFERENCES reference_materials(id) ON DELETE CASCADE,
+    selected_pages TEXT NOT NULL,
+    usage_scope TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(student_id, material_id)
+);
+CREATE TABLE IF NOT EXISTS reference_statement_choices (
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    topic TEXT NOT NULL,
+    statement_id INTEGER NOT NULL REFERENCES reference_statements(id) ON DELETE CASCADE,
+    chosen_at TEXT NOT NULL,
+    PRIMARY KEY(student_id, topic)
+);
 CREATE INDEX IF NOT EXISTS idx_paths_goal ON paths(goal_id);
 CREATE INDEX IF NOT EXISTS idx_stages_path ON stages(path_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(stage_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS idx_placement_goal ON placement_tests(goal_id);
 CREATE INDEX IF NOT EXISTS idx_conv_task ON conversations(task_id);
+CREATE INDEX IF NOT EXISTS idx_reference_statements_topic ON reference_statements(topic);
+CREATE INDEX IF NOT EXISTS idx_material_selections_student ON material_selections(student_id);
 """
 
 
@@ -339,6 +393,155 @@ def lesson_plan_student_task_page(example: dict) -> dict:
         ],
         "updated_at": example["updated_at"],
     }
+
+
+# ---------- preparation persistence (validation belongs to prep service) ----------
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _student_to_dict(row: sqlite3.Row) -> dict:
+    return {"id": row["id"], "name": row["name"], "grade": row["grade"],
+            "subject": row["subject"], "observed_errors": json.loads(row["observed_errors"]),
+            "independent_tasks": json.loads(row["independent_tasks"]),
+            "school_progress_status": row["school_progress_status"],
+            "school_progress": row["school_progress"], "created_at": row["created_at"]}
+
+
+def create_student_record(record: dict, path: Path | None = None) -> int:
+    with _conn(path) as conn:
+        cur = conn.execute(
+            "INSERT INTO students(name, grade, subject, observed_errors, independent_tasks, "
+            "school_progress_status, school_progress, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (record["name"], record["grade"], record["subject"],
+             json.dumps(record["observed_errors"], ensure_ascii=False),
+             json.dumps(record["independent_tasks"], ensure_ascii=False),
+             record["school_progress_status"], record["school_progress"], _now()))
+        return cur.lastrowid
+
+
+def get_student_record(student_id: int, path: Path | None = None) -> dict | None:
+    with _conn(path) as conn:
+        row = conn.execute("SELECT * FROM students WHERE id=?", (student_id,)).fetchone()
+    return _student_to_dict(row) if row else None
+
+
+def list_student_records(path: Path | None = None) -> list[dict]:
+    with _conn(path) as conn:
+        rows = conn.execute("SELECT * FROM students ORDER BY id").fetchall()
+    return [_student_to_dict(row) for row in rows]
+
+
+def _material_to_dict(row: sqlite3.Row, statements: list[dict] | None = None) -> dict:
+    value = {"id": row["id"], "title": row["title"], "file_identifier": row["file_identifier"],
+             "source_kind": row["source_kind"], "selected_pages": json.loads(row["selected_pages"]),
+             "usage_scope": row["usage_scope"], "read_pages": json.loads(row["read_pages"]),
+             "unread_pages": json.loads(row["unread_pages"]), "created_at": row["created_at"]}
+    if statements is not None:
+        value["statements"] = statements
+    return value
+
+
+def create_reference_material_record(record: dict, statements: list[dict], path: Path | None = None) -> int:
+    with _conn(path) as conn:
+        cur = conn.execute(
+            "INSERT INTO reference_materials(title, file_identifier, source_kind, selected_pages, "
+            "usage_scope, read_pages, unread_pages, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (record["title"], record["file_identifier"], record["source_kind"],
+             json.dumps(record["selected_pages"], ensure_ascii=False), record["usage_scope"],
+             json.dumps(record["read_pages"], ensure_ascii=False),
+             json.dumps(record["unread_pages"], ensure_ascii=False), _now()))
+        material_id = cur.lastrowid
+        for statement in statements:
+            conn.execute("INSERT INTO reference_statements(material_id, topic, text, page) VALUES(?,?,?,?)",
+                         (material_id, statement["topic"], statement["text"], statement["page"]))
+        return material_id
+
+
+def _statements_for_material(conn: sqlite3.Connection, material_id: int) -> list[dict]:
+    return [dict(row) for row in conn.execute(
+        "SELECT id, material_id, topic, text, page FROM reference_statements WHERE material_id=? ORDER BY id",
+        (material_id,)).fetchall()]
+
+
+def get_reference_material_record(material_id: int, path: Path | None = None) -> dict | None:
+    with _conn(path) as conn:
+        row = conn.execute("SELECT * FROM reference_materials WHERE id=?", (material_id,)).fetchone()
+        statements = _statements_for_material(conn, material_id) if row else None
+    return _material_to_dict(row, statements) if row else None
+
+
+def list_reference_material_records(path: Path | None = None) -> list[dict]:
+    with _conn(path) as conn:
+        rows = conn.execute("SELECT * FROM reference_materials ORDER BY id").fetchall()
+        return [_material_to_dict(row, _statements_for_material(conn, row["id"])) for row in rows]
+
+
+def create_reference_citation_record(material_id: int, page: int, locator: str, path: Path | None = None) -> dict:
+    with _conn(path) as conn:
+        cur = conn.execute("INSERT INTO reference_citations(material_id, page, locator, created_at) VALUES(?,?,?,?)",
+                           (material_id, page, locator, _now()))
+        row = conn.execute("SELECT * FROM reference_citations WHERE id=?", (cur.lastrowid,)).fetchone()
+    return dict(row)
+
+
+def list_reference_citation_records(path: Path | None = None) -> list[dict]:
+    with _conn(path) as conn:
+        rows = conn.execute("SELECT * FROM reference_citations ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_reference_statements(topic: str | None = None, path: Path | None = None) -> list[dict]:
+    query = ("SELECT s.id, s.material_id, s.topic, s.text, s.page, m.title AS material_title "
+             "FROM reference_statements s JOIN reference_materials m ON m.id=s.material_id")
+    params: tuple = ()
+    if topic is not None:
+        query += " WHERE s.topic=?"
+        params = (topic,)
+    query += " ORDER BY s.id"
+    with _conn(path) as conn:
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
+def create_material_selection_record(student_id: int, material_id: int, selected_pages: list[int], usage_scope: str,
+                                     path: Path | None = None) -> dict:
+    with _conn(path) as conn:
+        conn.execute(
+            "INSERT INTO material_selections(student_id, material_id, selected_pages, usage_scope, created_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(student_id, material_id) DO UPDATE SET "
+            "selected_pages=excluded.selected_pages, usage_scope=excluded.usage_scope, created_at=excluded.created_at",
+            (student_id, material_id, json.dumps(selected_pages), usage_scope, _now()))
+        row = conn.execute("SELECT * FROM material_selections WHERE student_id=? AND material_id=?",
+                           (student_id, material_id)).fetchone()
+    return {**dict(row), "selected_pages": json.loads(row["selected_pages"])}
+
+
+def list_material_selection_records(student_id: int, path: Path | None = None) -> list[dict]:
+    with _conn(path) as conn:
+        rows = conn.execute("SELECT * FROM material_selections WHERE student_id=? ORDER BY id", (student_id,)).fetchall()
+        result = []
+        for row in rows:
+            material = conn.execute("SELECT * FROM reference_materials WHERE id=?", (row["material_id"],)).fetchone()
+            result.append({**dict(row), "selected_pages": json.loads(row["selected_pages"]),
+                           "material": _material_to_dict(material, _statements_for_material(conn, material["id"]))})
+    return result
+
+
+def choose_reference_statement_record(student_id: int, topic: str, statement_id: int, path: Path | None = None) -> dict:
+    now = _now()
+    with _conn(path) as conn:
+        conn.execute(
+            "INSERT INTO reference_statement_choices(student_id, topic, statement_id, chosen_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(student_id, topic) DO UPDATE SET statement_id=excluded.statement_id, chosen_at=excluded.chosen_at",
+            (student_id, topic, statement_id, now))
+    return {"student_id": student_id, "topic": topic, "statement_id": statement_id, "chosen_at": now}
+
+
+def list_reference_statement_choices(path: Path | None = None) -> list[dict]:
+    with _conn(path) as conn:
+        rows = conn.execute("SELECT * FROM reference_statement_choices ORDER BY student_id, topic").fetchall()
+    return [dict(row) for row in rows]
 
 
 # ---------- paths / stages / tasks ----------
@@ -671,4 +874,16 @@ def export_all(path: Path | None = None) -> dict:
                     t["attempts"] = get_attempts(t["id"], path)
             entry["paths"].append(p)
         goals.append(entry)
-    return {"goals": goals, "lesson_plan_examples": list_lesson_plan_examples(path)}
+    result = {"goals": goals, "lesson_plan_examples": list_lesson_plan_examples(path)}
+    students = list_student_records(path)
+    materials = list_reference_material_records(path)
+    if students or materials:
+        result["students"] = students
+        result["reference_materials"] = materials
+        selections = []
+        for student in students:
+            selections.extend(list_material_selection_records(student["id"], path))
+        result["material_selections"] = selections
+        result["reference_citations"] = list_reference_citation_records(path)
+        result["reference_statement_choices"] = list_reference_statement_choices(path)
+    return result

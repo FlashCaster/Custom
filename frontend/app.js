@@ -82,6 +82,7 @@ const state = {
   lessonPlan: null,
   lessonPlanMode: "teacher",
   lessonPlanEditing: false,
+  preparation: null,
 };
 
 function flatTasks(path) {
@@ -119,6 +120,217 @@ async function boot() {
 }
 
 // ---------- 示例备课 ----------
+
+// ---------- 学生与材料：真实备课输入，不与示例数据混写 ----------
+
+function commaList(value) {
+  return value.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function pageList(value) {
+  return commaList(value).map((item) => Number(item));
+}
+
+async function enterPreparation() {
+  state.view = "preparation";
+  const [students, materials, statements] = await Promise.all([
+    api("/students"), api("/reference-materials"), api("/reference-statements"),
+  ]);
+  const selectedStudentId = state.preparation && state.preparation.selectedStudentId;
+  state.preparation = { students, materials, statements, selectedStudentId };
+  setTopbar("备课资料", false);
+  renderSidebarEmpty("学生与参考材料");
+  renderPreparation();
+}
+
+function renderPreparation() {
+  const prep = state.preparation;
+  const selected = prep.students.find((student) => student.id === prep.selectedStudentId) || null;
+  const studentRows = prep.students.map((student) => {
+    const button = el("button", { class: `ghost-btn${selected && selected.id === student.id ? " selected" : ""}` }, [student.name]);
+    button.addEventListener("click", async () => {
+      prep.selectedStudentId = student.id;
+      await loadPreparationSelections();
+      renderPreparation();
+    });
+    return button;
+  });
+  const content = [
+    el("section", { class: "card" }, [
+      el("h2", { class: "section-title" }, ["学生档案"]),
+      el("div", { class: "card-head" }, studentRows.length ? studentRows : [el("span", { class: "meta-line" }, ["尚未创建学生"])]),
+      renderStudentForm(),
+    ]),
+  ];
+  if (selected) content.push(renderSelectedStudent(selected));
+  content.push(renderMaterialForm(), renderPastedMaterialForm());
+  if (selected) content.push(renderMaterialSelections(selected), renderStatementChoices(selected));
+  renderMain(el("div", { class: "container" }, content));
+}
+
+function renderStudentForm() {
+  const name = el("input", { class: "text-input", placeholder: "学生称呼" });
+  const grade = el("input", { class: "text-input", placeholder: "年级" });
+  const subject = el("input", { class: "text-input", placeholder: "科目" });
+  const errors = el("textarea", { class: "text-input", placeholder: "已观察错误，逗号分隔" });
+  const independent = el("textarea", { class: "text-input", placeholder: "能独立完成什么，逗号分隔" });
+  const progressStatus = el("select", { class: "text-input" }, [
+    el("option", { value: "unknown" }, ["学校进度未知"]),
+    el("option", { value: "known" }, ["学校进度已知"]),
+  ]);
+  const progress = el("input", { class: "text-input", placeholder: "仅进度已知时填写" });
+  const hint = el("span", { class: "hint info" });
+  const save = el("button", { class: "btn-primary" }, ["创建学生"]);
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      const student = await api("/students", { method: "POST", body: {
+        name: name.value, grade: grade.value, subject: subject.value,
+        observed_errors: commaList(errors.value), independent_tasks: commaList(independent.value),
+        school_progress_status: progressStatus.value,
+        school_progress: progressStatus.value === "known" ? progress.value : null,
+      }});
+      state.preparation.students.push(student);
+      state.preparation.selectedStudentId = student.id;
+      await loadPreparationSelections();
+      renderPreparation();
+    } catch (error) {
+      hint.className = "hint";
+      hint.textContent = `创建失败：${error.detail || error}`;
+      save.disabled = false;
+    }
+  });
+  return el("div", { class: "preparation-form" }, [
+    el("label", { class: "field-label" }, ["新学生"]), name, grade, subject, errors, independent,
+    progressStatus, progress, el("div", { class: "input-actions" }, [hint, save]),
+  ]);
+}
+
+function renderSelectedStudent(student) {
+  const progress = student.school_progress_status === "unknown" ? "学校进度未知" : student.school_progress;
+  return el("section", { class: "card" }, [
+    el("h2", { class: "section-title" }, [student.name]),
+    el("p", { class: "meta-line" }, [`${student.grade} · ${student.subject} · ${progress}`]),
+    el("p", {}, ["已观察错误：", student.observed_errors.join("；")]),
+    el("p", {}, ["能独立完成：", student.independent_tasks.join("；")]),
+  ]);
+}
+
+function renderMaterialForm() {
+  const title = el("input", { class: "text-input", placeholder: "材料名称" });
+  const fileIdentifier = el("input", { class: "text-input", placeholder: "文件标识" });
+  const scope = el("input", { class: "text-input", placeholder: "本材料使用范围" });
+  const selectedPages = el("input", { class: "text-input", value: "1", placeholder: "选择页码，如 12,13" });
+  const readPage = el("input", { class: "text-input", value: "1", placeholder: "已读取页码" });
+  const readContent = el("textarea", { class: "text-input", placeholder: "该已读页的实际正文" });
+  const unreadPages = el("input", { class: "text-input", placeholder: "无法读取页码，如 13" });
+  const hint = el("span", { class: "hint info" });
+  const save = el("button", { class: "btn-primary" }, ["记录文件材料"]);
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      const material = await api("/reference-materials", { method: "POST", body: {
+        title: title.value, file_identifier: fileIdentifier.value, usage_scope: scope.value,
+        selected_pages: pageList(selectedPages.value),
+        read_pages: [{ page: Number(readPage.value), content: readContent.value }],
+        unread_pages: unreadPages.value.trim() ? pageList(unreadPages.value) : [], statements: [],
+      }});
+      state.preparation.materials.push(material);
+      renderPreparation();
+    } catch (error) {
+      hint.className = "hint";
+      hint.textContent = `材料未保存：${error.detail || error}`;
+      save.disabled = false;
+    }
+  });
+  return el("section", { class: "card preparation-form" }, [
+    el("h2", { class: "section-title" }, ["参考文件"]), title, fileIdentifier, scope, selectedPages, readPage, readContent, unreadPages,
+    el("div", { class: "input-actions" }, [hint, save]),
+  ]);
+}
+
+function renderPastedMaterialForm() {
+  const title = el("input", { class: "text-input", placeholder: "粘贴内容名称" });
+  const scope = el("input", { class: "text-input", placeholder: "本材料使用范围" });
+  const content = el("textarea", { class: "text-input", placeholder: "粘贴可作为来源的正文" });
+  const hint = el("span", { class: "hint info" });
+  const save = el("button", { class: "ghost-btn" }, ["添加粘贴内容"]);
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      const material = await api("/reference-materials/pasted", { method: "POST", body: {
+        title: title.value, usage_scope: scope.value, content: content.value,
+      }});
+      state.preparation.materials.push(material);
+      renderPreparation();
+    } catch (error) {
+      hint.className = "hint";
+      hint.textContent = `粘贴内容未保存：${error.detail || error}`;
+      save.disabled = false;
+    }
+  });
+  return el("section", { class: "card preparation-form" }, [
+    el("h2", { class: "section-title" }, ["粘贴材料"]), title, scope, content,
+    el("div", { class: "input-actions" }, [hint, save]),
+  ]);
+}
+
+async function loadPreparationSelections() {
+  const studentId = state.preparation.selectedStudentId;
+  state.preparation.selections = studentId
+    ? await api(`/students/${studentId}/reference-materials/selections`) : [];
+}
+
+function renderMaterialSelections(student) {
+  const selectedIds = new Set((state.preparation.selections || []).map((item) => item.material_id));
+  const rows = state.preparation.materials.map((material) => {
+    const scope = el("input", { class: "text-input", value: material.usage_scope });
+    const pages = el("input", { class: "text-input", value: material.selected_pages.join(",") });
+    const save = el("button", { class: "ghost-btn" }, [selectedIds.has(material.id) ? "更新范围" : "用于本次备课"]);
+    save.addEventListener("click", async () => {
+      await api(`/students/${student.id}/reference-materials/${material.id}/selections`, {
+        method: "POST", body: { selected_pages: pageList(pages.value), usage_scope: scope.value },
+      });
+      await loadPreparationSelections();
+      renderPreparation();
+    });
+    const unread = material.unread_pages.length ? `无法读取：第 ${material.unread_pages.join("、")} 页` : "已读取所选页";
+    return el("section", { class: "card" }, [
+      el("h3", { class: "section-title" }, [material.title]),
+      el("p", { class: material.unread_pages.length ? "hint" : "meta-line" }, [unread]),
+      el("p", { class: "meta-line" }, [`来源：${material.source_kind === "pasted" ? "教师粘贴" : material.file_identifier}`]),
+      pages, scope, save,
+    ]);
+  });
+  const newQuestion = el("button", { class: "ghost-btn" }, ["新编题"]);
+  newQuestion.addEventListener("click", () => {
+    state.preparation.newQuestionRequested = true;
+    renderPreparation();
+  });
+  return el("section", {}, [
+    el("div", { class: "lesson-plan-head" }, [el("h2", { class: "section-title" }, ["选择材料与范围"]), newQuestion]),
+    ...(state.preparation.newQuestionRequested ? [el("p", { class: "meta-line" }, ["新编题将在生成备课稿时标记为新编，并等待教师确认。"])] : []),
+    ...(rows.length ? rows : [el("p", { class: "meta-line" }, ["尚未记录参考材料"])]),
+  ]);
+}
+
+function renderStatementChoices(student) {
+  const statements = state.preparation.statements;
+  if (!statements.length) return el("section", { class: "card" }, [el("p", { class: "meta-line" }, ["暂无可定位的材料表述"])]);
+  const rows = statements.map((statement) => {
+    const choose = el("button", { class: "ghost-btn" }, ["采用此表述"]);
+    choose.addEventListener("click", async () => {
+      await api(`/students/${student.id}/reference-statements/${statement.id}/choose`, { method: "POST" });
+      choose.textContent = "已采用";
+      choose.disabled = true;
+    });
+    return el("div", { class: "teacher-details" }, [
+      el("p", {}, [statement.text]),
+      el("p", { class: "meta-line" }, [`${statement.material_title} · 第 ${statement.page} 页`]), choose,
+    ]);
+  });
+  return el("section", { class: "card" }, [el("h2", { class: "section-title" }, ["材料表述"]), ...rows]);
+}
 
 const LESSON_PLAN_FIELDS = [
   ["student_task", "学生任务"],
@@ -738,6 +950,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-export-side").addEventListener("click", onExport);
   $("btn-lesson-plan-example").addEventListener("click", () => {
     enterLessonPlan().catch(showLessonPlanError);
+  });
+  $("btn-preparation-inputs").addEventListener("click", () => {
+    enterPreparation().catch(showLessonPlanError);
   });
   $("btn-learning-path").addEventListener("click", () => {
     openLearningPath().catch(showLessonPlanError);

@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend import checker, planner, store
+from backend import checker, planner, prep, store
 
 
 @asynccontextmanager
@@ -96,6 +96,67 @@ class LessonPlanExampleUpdate(BaseModel):
     activities: list
 
 
+class StudentCreate(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    name: str
+    grade: str
+    subject: str
+    observed_errors: list[str]
+    independent_tasks: list[str]
+    school_progress_status: str
+    school_progress: str | None = None
+
+
+class MaterialReadPage(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    page: int
+    content: str
+
+
+class MaterialStatement(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    topic: str
+    text: str
+    page: int
+
+
+class ReferenceMaterialCreate(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    title: str
+    file_identifier: str
+    selected_pages: list[int]
+    usage_scope: str
+    read_pages: list[MaterialReadPage]
+    unread_pages: list[int]
+    statements: list[MaterialStatement] = Field(default_factory=list)
+
+
+class PastedMaterialCreate(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    title: str
+    content: str
+    usage_scope: str
+
+
+class CitationCreate(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    page: int
+    locator: str
+
+
+class MaterialSelectionCreate(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    selected_pages: list[int]
+    usage_scope: str
+
+
 # ---------- LLM client 工厂 ----------
 
 def get_llm_client():
@@ -112,6 +173,65 @@ def get_llm_client():
 
 
 # ---------- lesson plan examples ----------
+
+# ---------- preparation inputs ----------
+
+@app.post("/students", status_code=201)
+def create_student_route(body: StudentCreate) -> dict:
+    return prep.student_profile(body.model_dump())
+
+
+@app.get("/students")
+def list_students_route() -> list[dict]:
+    return store.list_student_records()
+
+
+@app.get("/students/{student_id}")
+def get_student_route(student_id: int) -> dict:
+    student = store.get_student_record(student_id)
+    if student is None:
+        raise HTTPException(status_code=404, detail=f"student {student_id} 不存在")
+    return student
+
+
+@app.post("/reference-materials/pasted", status_code=201)
+def create_pasted_material_route(body: PastedMaterialCreate) -> dict:
+    return prep.pasted_material(body.model_dump())
+
+
+@app.post("/reference-materials", status_code=201)
+def create_reference_material_route(body: ReferenceMaterialCreate) -> dict:
+    return prep.reference_material(body.model_dump())
+
+
+@app.get("/reference-materials")
+def list_reference_materials_route() -> list[dict]:
+    return [prep.material_view(material) for material in store.list_reference_material_records()]
+
+
+@app.post("/reference-materials/{material_id}/citations", status_code=201)
+def create_reference_citation_route(material_id: int, body: CitationCreate) -> dict:
+    return prep.cite_material(material_id, body.page, body.locator)
+
+
+@app.get("/reference-statements")
+def list_reference_statements_route(topic: str | None = None) -> list[dict]:
+    return prep.statements(topic)
+
+
+@app.post("/students/{student_id}/reference-materials/{material_id}/selections", status_code=201)
+def select_reference_material_route(student_id: int, material_id: int, body: MaterialSelectionCreate) -> dict:
+    return prep.select_material(student_id, material_id, body.model_dump())
+
+
+@app.get("/students/{student_id}/reference-materials/selections")
+def list_material_selections_route(student_id: int) -> list[dict]:
+    return prep.material_selections(student_id)
+
+
+@app.post("/students/{student_id}/reference-statements/{statement_id}/choose")
+def choose_reference_statement_route(student_id: int, statement_id: int) -> dict:
+    return prep.choose_statement(student_id, statement_id)
 
 def _get_lesson_plan_example_or_404(example_id: str) -> dict:
     if example_id == "default":
