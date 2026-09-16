@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS conversations (
     content TEXT NOT NULL,
     ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lesson_plan_examples (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    activities TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_paths_goal ON paths(goal_id);
 CREATE INDEX IF NOT EXISTS idx_stages_path ON stages(path_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(stage_id);
@@ -86,6 +92,64 @@ CREATE INDEX IF NOT EXISTS idx_attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS idx_placement_goal ON placement_tests(goal_id);
 CREATE INDEX IF NOT EXISTS idx_conv_task ON conversations(task_id);
 """
+
+
+_EXAMPLE_ACTIVITY_FIELDS = (
+    "id",
+    "position",
+    "title",
+    "student_task",
+    "answer_space",
+    "feedback_record",
+    "teacher_observation",
+    "teacher_prompt",
+    "answer_check",
+    "stuck_support",
+)
+
+_DEFAULT_LESSON_PLAN_EXAMPLE = {
+    "id": "default",
+    "label": "示例",
+    "title": "集合与函数备课稿",
+    "activities": [
+        {
+            "id": "set-inequality-check",
+            "position": 0,
+            "title": "集合与不等式检查",
+            "student_task": "判断给出的元素是否属于集合，并写出每一步判断理由。",
+            "answer_space": "判断：____________________\n理由：____________________",
+            "feedback_record": "我在哪一步不确定：____________________",
+            "teacher_observation": "先看学生是否主动区分元素、集合与不等式条件。",
+            "teacher_prompt": "你用了哪个条件？把它代回去会发生什么？",
+            "answer_check": "核查集合符号、条件范围和不等式方向是否一致。",
+            "stuck_support": "让学生先圈出条件中的变量和范围，再口头说出判断依据。",
+        },
+        {
+            "id": "function-relation-judgement",
+            "position": 1,
+            "title": "函数关系判断",
+            "student_task": "判断每个关系是不是函数，并写出理由。",
+            "answer_space": "判断：____________________\n理由：____________________",
+            "feedback_record": "我检查了输入和输出：____________________",
+            "teacher_observation": "观察学生是否说出“每个输入恰好一个输出”，而非只凭图形印象。",
+            "teacher_prompt": "同一个输入可以对应几个输出？逐个输入检查。",
+            "answer_check": "函数要求定义域内每个输入恰好对应一个输出。",
+            "stuck_support": "把关系写成输入与输出的配对，先检查有没有一个输入连到两个输出。",
+        },
+        {
+            "id": "function-domain-practice",
+            "position": 2,
+            "title": "函数定义域练习",
+            "student_task": "如果前一项完成顺利，从情境中写出函数自变量的取值范围。",
+            "answer_space": "自变量表示：____________________\n取值范围：____________________",
+            "feedback_record": "情境限制是：____________________",
+            "teacher_observation": "仅在函数判断已稳固时进入，检查学生是否从情境限制而非公式习惯确定范围。",
+            "teacher_prompt": "这个量在情境里能取负数吗？还需要满足什么条件？",
+            "answer_check": "定义域由情境和表达式共同限制，不能只看一种限制。",
+            "stuck_support": "先用一句话说明自变量代表什么，再列出不能出现的取值。",
+        },
+    ],
+}
 
 
 def init_db(path: Path = DB_PATH) -> None:
@@ -141,6 +205,26 @@ def _require_str_list(value, name: str) -> list[str]:
     return value
 
 
+def _validate_example_activities(activities) -> list[dict]:
+    if not isinstance(activities, list) or not activities:
+        raise ValueError("activities 必须是非空列表")
+    validated = []
+    for position, activity in enumerate(activities):
+        if not isinstance(activity, dict):
+            raise ValueError("每个 activity 必须是对象")
+        output = {}
+        for field in _EXAMPLE_ACTIVITY_FIELDS:
+            value = activity.get(field)
+            if field == "position":
+                if isinstance(value, bool) or not isinstance(value, int) or value != position:
+                    raise ValueError("activity.position 必须从 0 开始连续编号")
+            elif not isinstance(value, str) or not value.strip():
+                raise ValueError(f"activity.{field} 必须是非空字符串")
+            output[field] = value
+        validated.append(output)
+    return validated
+
+
 # ---------- goals ----------
 
 def create_goal(statement: str, interests: list[str] | None = None, path: Path | None = None) -> int:
@@ -174,6 +258,87 @@ def list_goals(path: Path | None = None) -> list[dict]:
     with _conn(path) as conn:
         rows = conn.execute("SELECT * FROM goals ORDER BY id").fetchall()
     return [_goal_to_dict(r) for r in rows]
+
+
+# ---------- lesson plan examples ----------
+
+def _lesson_plan_example_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "label": "示例",
+        "title": row["title"],
+        "activities": json.loads(row["activities"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_lesson_plan_example(example_id: str, path: Path | None = None) -> dict | None:
+    with _conn(path) as conn:
+        row = conn.execute(
+            "SELECT * FROM lesson_plan_examples WHERE id=?", (example_id,)
+        ).fetchone()
+    return _lesson_plan_example_to_dict(row) if row else None
+
+
+def get_or_create_default_lesson_plan_example(path: Path | None = None) -> dict:
+    """首次浏览时创建内置示例，不写入 goals、paths 或任何学生数据。"""
+    with _conn(path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO lesson_plan_examples(id, title, activities, updated_at) "
+            "VALUES(?,?,?,?)",
+            (
+                _DEFAULT_LESSON_PLAN_EXAMPLE["id"],
+                _DEFAULT_LESSON_PLAN_EXAMPLE["title"],
+                json.dumps(_DEFAULT_LESSON_PLAN_EXAMPLE["activities"], ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM lesson_plan_examples WHERE id=?",
+            (_DEFAULT_LESSON_PLAN_EXAMPLE["id"],),
+        ).fetchone()
+    return _lesson_plan_example_to_dict(row)
+
+
+def update_lesson_plan_example(example_id: str, title: str, activities: list,
+                               path: Path | None = None) -> dict | None:
+    _require_nonempty_str(example_id, "example_id")
+    _require_nonempty_str(title, "title")
+    activities = _validate_example_activities(activities)
+    with _conn(path) as conn:
+        cur = conn.execute(
+            "UPDATE lesson_plan_examples SET title=?, activities=?, updated_at=? WHERE id=?",
+            (title, json.dumps(activities, ensure_ascii=False),
+             datetime.now(timezone.utc).isoformat(), example_id),
+        )
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM lesson_plan_examples WHERE id=?", (example_id,)
+        ).fetchone()
+    return _lesson_plan_example_to_dict(row)
+
+
+def list_lesson_plan_examples(path: Path | None = None) -> list[dict]:
+    with _conn(path) as conn:
+        rows = conn.execute("SELECT * FROM lesson_plan_examples ORDER BY id").fetchall()
+    return [_lesson_plan_example_to_dict(row) for row in rows]
+
+
+def lesson_plan_student_task_page(example: dict) -> dict:
+    """学生页只投影活动的学生可见字段，永不带教师核查内容。"""
+    return {
+        "id": example["id"],
+        "label": example["label"],
+        "title": example["title"],
+        "activities": [
+            {field: activity[field] for field in (
+                "id", "position", "title", "student_task", "answer_space", "feedback_record"
+            )}
+            for activity in example["activities"]
+        ],
+        "updated_at": example["updated_at"],
+    }
 
 
 # ---------- paths / stages / tasks ----------
@@ -495,7 +660,7 @@ def list_messages(task_id: int, path: Path | None = None) -> list[dict]:
 
 
 def export_all(path: Path | None = None) -> dict:
-    """全量嵌套导出：goals→paths→stages→tasks→attempts（attempts 按 task 挂载）。"""
+    """全量嵌套导出，并与通用学习路径分开保留示例备课数据。"""
     goals = []
     for goal in list_goals(path):
         entry = dict(goal)
@@ -506,4 +671,4 @@ def export_all(path: Path | None = None) -> dict:
                     t["attempts"] = get_attempts(t["id"], path)
             entry["paths"].append(p)
         goals.append(entry)
-    return {"goals": goals}
+    return {"goals": goals, "lesson_plan_examples": list_lesson_plan_examples(path)}

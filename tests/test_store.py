@@ -446,8 +446,8 @@ def test_list_paths_all_and_filter_by_goal(db):
 
 
 def test_export_all_empty_db(db):
-    """T05 export_all 空库：goals 为空列表。"""
-    assert store.export_all(path=db) == {"goals": []}
+    """T05 export_all 空库：通用学习路径与示例备课数据均为空列表。"""
+    assert store.export_all(path=db) == {"goals": [], "lesson_plan_examples": []}
 
 
 def test_export_all_nested_with_attempts(db):

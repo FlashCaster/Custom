@@ -72,13 +72,16 @@ const $ = (id) => document.getElementById(id);
 // ---------- 全局状态 ----------
 
 const state = {
-  view: "loading",   // loading | new-goal | edit | exec
+  view: "loading",   // loading | lesson-plan | new-goal | edit | exec
   path: null,        // 当前 path 完整树（exec 视图含 attempts，来自 /export）
   draft: null,       // 候选编辑工作副本 {title, stages}
   dirty: false,      // 候选是否被改过（改过 → 先 PUT 再 activate）
   progress: null,    // {current_task_id, current_stage_id, completed, total, percent}
   selectedTaskId: null,
   lastResult: null,  // {taskId, result, evidence, recommended_difficulty}
+  lessonPlan: null,
+  lessonPlanMode: "teacher",
+  lessonPlanEditing: false,
 };
 
 function flatTasks(path) {
@@ -106,12 +109,162 @@ async function boot() {
       state.path = active;
       await enterExec();
     } else {
-      showNewGoal();
+      await enterLessonPlan();
     }
   } catch (e) {
     renderMain(el("div", { class: "container" }, [
       el("p", { class: "hint" }, [`加载失败：${e.detail || e}`]),
     ]));
+  }
+}
+
+// ---------- 示例备课 ----------
+
+const LESSON_PLAN_FIELDS = [
+  ["student_task", "学生任务"],
+  ["answer_space", "作答区"],
+  ["feedback_record", "学生反馈记录"],
+  ["teacher_observation", "观察点"],
+  ["teacher_prompt", "追问"],
+  ["answer_check", "答案或核查依据"],
+  ["stuck_support", "卡住时的处理办法"],
+];
+
+async function enterLessonPlan(mode = "teacher") {
+  state.view = "lesson-plan";
+  state.lessonPlanMode = mode;
+  state.lessonPlanEditing = false;
+  const suffix = mode === "student" ? "/student-task-page" : "/teacher-manuscript";
+  state.lessonPlan = await api(`/lesson-plan-examples/default${suffix}`);
+  setTopbar(state.lessonPlan.title, false);
+  renderSidebarEmpty("示例备课稿");
+  renderLessonPlan();
+}
+
+function renderLessonPlan() {
+  const plan = state.lessonPlan;
+  const teacher = state.lessonPlanMode === "teacher";
+  const tabs = el("div", { class: "view-tabs" }, [
+    lessonPlanTab("教师稿", "teacher", teacher),
+    lessonPlanTab("学生任务页", "student", !teacher),
+  ]);
+  const editButton = teacher && !state.lessonPlanEditing
+    ? el("button", { class: "ghost-btn" }, ["编辑示例"])
+    : null;
+  if (editButton) editButton.addEventListener("click", () => startLessonPlanEdit());
+
+  const header = el("div", { class: "lesson-plan-head" }, [
+    el("div", {}, [
+      el("span", { class: "badge" }, [plan.label]),
+      el("h2", { class: "section-title", style: "margin:10px 0 0" }, [plan.title]),
+    ]),
+    el("div", { class: "card-head" }, [tabs, editButton]),
+  ]);
+  const content = state.lessonPlanEditing
+    ? renderLessonPlanEditor(plan)
+    : plan.activities.map((activity) => renderLessonPlanActivity(activity, teacher));
+  renderMain(el("div", { class: "container" }, [header, ...content]));
+}
+
+function lessonPlanTab(label, mode, active) {
+  const tab = el("button", { class: `view-tab${active ? " active" : ""}` }, [label]);
+  tab.addEventListener("click", () => {
+    if (state.lessonPlanMode !== mode) enterLessonPlan(mode).catch(showLessonPlanError);
+  });
+  return tab;
+}
+
+function renderLessonPlanActivity(activity, teacher) {
+  const body = [
+    el("p", { class: "crumb" }, [`活动 ${activity.position + 1}`]),
+    el("h3", { class: "section-title" }, [activity.title]),
+    el("p", { class: "activity-student" }, [activity.student_task]),
+    el("div", { class: "answer-space" }, [activity.answer_space]),
+    el("p", { class: "student-record" }, [`反馈记录：${activity.feedback_record}`]),
+  ];
+  if (teacher) {
+    body.push(el("div", { class: "teacher-details" }, [
+      lessonPlanDetail("观察点", activity.teacher_observation),
+      lessonPlanDetail("追问", activity.teacher_prompt),
+      lessonPlanDetail("答案或核查依据", activity.answer_check),
+      lessonPlanDetail("卡住时的处理办法", activity.stuck_support),
+    ]));
+  }
+  return el("section", { class: "card" }, body);
+}
+
+function lessonPlanDetail(label, text) {
+  return el("p", {}, [el("span", { class: "field-label", style: "display:inline; margin:0 8px 0 0" }, [label]), text]);
+}
+
+async function startLessonPlanEdit() {
+  state.lessonPlan = await api("/lesson-plan-examples/default");
+  state.lessonPlanEditing = true;
+  renderLessonPlan();
+}
+
+function renderLessonPlanEditor(plan) {
+  const titleInput = el("input", { class: "text-input", value: plan.title });
+  titleInput.addEventListener("input", () => { plan.title = titleInput.value; });
+  const cards = plan.activities.map((activity) => {
+    const title = el("input", { class: "text-input", value: activity.title });
+    title.addEventListener("input", () => { activity.title = title.value; });
+    const fields = LESSON_PLAN_FIELDS.map(([field, label]) => {
+      const input = el("textarea", { class: "text-input" });
+      input.value = activity[field];
+      input.addEventListener("input", () => { activity[field] = input.value; });
+      return [el("label", { class: "field-label" }, [label]), input];
+    }).flat();
+    return el("section", { class: "card activity-editor" }, [
+      el("p", { class: "crumb" }, [`活动 ${activity.position + 1}`]),
+      el("label", { class: "field-label" }, ["活动标题"]), title, ...fields,
+    ]);
+  });
+  const hint = el("span", { class: "hint info" });
+  const cancel = el("button", { class: "ghost-btn" }, ["取消"]);
+  cancel.addEventListener("click", () => enterLessonPlan().catch(showLessonPlanError));
+  const save = el("button", { class: "btn-primary" }, ["保存示例"]);
+  save.addEventListener("click", () => saveLessonPlanExample(save, hint));
+  return [
+    el("section", { class: "card" }, [el("label", { class: "field-label" }, ["备课稿标题"]), titleInput]),
+    ...cards,
+    el("section", { class: "card" }, [el("div", { class: "input-actions" }, [hint, el("div", {}, [cancel, save])])]),
+  ];
+}
+
+async function saveLessonPlanExample(button, hint) {
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    state.lessonPlan = await api("/lesson-plan-examples/default", {
+      method: "PUT",
+      body: { title: state.lessonPlan.title, activities: state.lessonPlan.activities },
+    });
+    state.lessonPlanEditing = false;
+    state.lessonPlanMode = "teacher";
+    renderLessonPlan();
+  } catch (e) {
+    hint.className = "hint";
+    hint.textContent = `保存失败：${e.detail || e}`;
+    button.disabled = false;
+    button.textContent = "保存示例";
+  }
+}
+
+function showLessonPlanError(error) {
+  renderMain(el("div", { class: "container" }, [
+    el("p", { class: "hint" }, [`加载示例备课稿失败：${error.detail || error}`]),
+  ]));
+}
+
+async function openLearningPath() {
+  const dump = await api("/export");
+  const active = dump.goals.flatMap((goal) => goal.paths).find((path) => path.status === "active");
+  if (active) {
+    state.path = active;
+    await enterExec();
+  } else {
+    showNewGoal();
   }
 }
 
@@ -583,6 +736,12 @@ async function onExport() {
 document.addEventListener("DOMContentLoaded", () => {
   $("btn-export").addEventListener("click", onExport);
   $("btn-export-side").addEventListener("click", onExport);
+  $("btn-lesson-plan-example").addEventListener("click", () => {
+    enterLessonPlan().catch(showLessonPlanError);
+  });
+  $("btn-learning-path").addEventListener("click", () => {
+    openLearningPath().catch(showLessonPlanError);
+  });
   $("btn-export").prepend(svgIcon(ICON_DOWNLOAD));
   $("btn-export-side").prepend(svgIcon(ICON_DOWNLOAD));
   boot();

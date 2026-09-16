@@ -88,6 +88,14 @@ class PathUpdate(BaseModel):
     stages: list
 
 
+class LessonPlanExampleUpdate(BaseModel):
+    """示例备课稿可整体保存；活动字段由 store 做领域校验。"""
+    model_config = ConfigDict(strict=True)
+
+    title: str
+    activities: list
+
+
 # ---------- LLM client 工厂 ----------
 
 def get_llm_client():
@@ -101,6 +109,41 @@ def get_llm_client():
     from openai import OpenAI
 
     return OpenAI(api_key=key, base_url="https://api.deepseek.com")
+
+
+# ---------- lesson plan examples ----------
+
+def _get_lesson_plan_example_or_404(example_id: str) -> dict:
+    if example_id == "default":
+        return store.get_or_create_default_lesson_plan_example()
+    example = store.get_lesson_plan_example(example_id)
+    if example is None:
+        raise HTTPException(status_code=404, detail=f"示例备课稿 {example_id} 不存在")
+    return example
+
+
+@app.get("/lesson-plan-examples/{example_id}")
+def get_lesson_plan_example_route(example_id: str) -> dict:
+    return _get_lesson_plan_example_or_404(example_id)
+
+
+@app.get("/lesson-plan-examples/{example_id}/teacher-manuscript")
+def get_teacher_manuscript_route(example_id: str) -> dict:
+    return _get_lesson_plan_example_or_404(example_id)
+
+
+@app.get("/lesson-plan-examples/{example_id}/student-task-page")
+def get_student_task_page_route(example_id: str) -> dict:
+    return store.lesson_plan_student_task_page(_get_lesson_plan_example_or_404(example_id))
+
+
+@app.put("/lesson-plan-examples/{example_id}")
+def update_lesson_plan_example_route(example_id: str, body: LessonPlanExampleUpdate) -> dict:
+    _get_lesson_plan_example_or_404(example_id)
+    updated = store.update_lesson_plan_example(example_id, body.title, body.activities)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"示例备课稿 {example_id} 不存在")
+    return updated
 
 
 # ---------- goals ----------
