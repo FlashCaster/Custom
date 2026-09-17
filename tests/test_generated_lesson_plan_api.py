@@ -54,8 +54,11 @@ def _fake_client(material_id, statement_id):
     basis = [{"material_id": material_id, "page": 1, "locator": "每一个输入恰好对应一个输出"}]
     fields = {"answer_space": "作答区", "feedback_record": "记录区", "teacher_observation": "观察点",
               "teacher_prompt": "追问", "answer_check": "核查依据", "stuck_support": "卡住处理",
-              "minutes": 15, "material_basis": basis, "selected_statement_ids": [statement_id]}
-    payload = {"title": "集合与函数备课稿", "school_progress_status": "unknown", "school_progress": None,
+              "minutes": 15, "material_basis": basis, "selected_statement_ids": [statement_id],
+              "assumption_ids": ["school_progress"]}
+    payload = {"title": "集合与函数备课稿",
+               "assumptions": [{"id": "school_progress", "kind": "school_progress", "source": "teacher_profile",
+                                "status": "unknown", "known_content": []}],
                "activities": [
                    {**fields, "topic": "sets_inequalities", "title": "集合与不等式检查", "student_task": "写判断理由",
                     "defer_if_old_knowledge_weak": False},
@@ -86,3 +89,12 @@ def test_teacher_generates_a_real_candidate_only_by_clicking_the_generation_endp
     fetched = api.get(f"/lesson-plans/{plan['id']}/teacher-manuscript")
     assert fetched.status_code == 200
     assert fetched.json()["activities"] == plan["activities"]
+
+    plan["title"] = "教师改写的标题"
+    plan["activities"][0]["student_task"] = "改写后的学生任务"
+    saved = api.put(f"/lesson-plans/{plan['id']}", json={
+        "title": plan["title"], "activities": plan["activities"],
+    })
+    assert saved.status_code == 200
+    assert saved.json()["title"] == "教师改写的标题"
+    assert saved.json()["activities"][0]["student_task"] == "改写后的学生任务"

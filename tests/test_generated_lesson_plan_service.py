@@ -59,11 +59,12 @@ def _candidate(material_id: int, statement_id: int):
         "teacher_observation": "观察学生是否写出理由", "teacher_prompt": "逐个检查输入和输出。",
         "answer_check": "核查依据：定义域内每一个输入恰好对应一个输出。",
         "stuck_support": "先列出输入，再逐项配对。", "minutes": 15,
-        "material_basis": basis, "selected_statement_ids": [statement_id],
+        "material_basis": basis, "selected_statement_ids": [statement_id], "assumption_ids": ["school_progress"],
     }
     return {
-        "title": "小林的集合与函数备课稿", "school_progress_status": "unknown",
-        "school_progress": None,
+        "title": "小林的集合与函数备课稿",
+        "assumptions": [{"id": "school_progress", "kind": "school_progress", "source": "teacher_profile",
+                         "status": "unknown", "known_content": []}],
         "activities": [
             {**common, "topic": "sets_inequalities", "title": "集合与不等式检查",
              "student_task": "代入集合条件并写出不等式判断理由。",
@@ -75,12 +76,16 @@ def _candidate(material_id: int, statement_id: int):
     }
 
 
-def _client(payload: dict, usage=(21, 34)):
+def _client(payload: dict, usage=(21, 34), captured=None):
     response = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)))],
-        usage=SimpleNamespace(prompt_tokens=usage[0], completion_tokens=usage[1]),
+        usage=None if usage is None else SimpleNamespace(prompt_tokens=usage[0], completion_tokens=usage[1]),
     )
-    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: response)))
+    def create(**kwargs):
+        if captured is not None:
+            captured.update(kwargs)
+        return response
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
 
 def test_generation_uses_only_selected_read_material_and_persists_candidate_and_usage(db):
@@ -97,6 +102,7 @@ def test_generation_uses_only_selected_read_material_and_persists_candidate_and_
     assert plan["student_id"] == student["id"]
     assert [activity["topic"] for activity in plan["activities"]] == ["sets_inequalities", "function_concept"]
     assert plan["activities"][1]["defer_if_old_knowledge_weak"] is True
+    assert plan["assumptions"] == raw["assumptions"]
     assert plan["material_context"] == [{
         "material_id": material["id"], "title": "函数概念讲义", "selected_pages": [12, 13],
         "usage_scope": "本次函数概念核查；第 13 页不可引用",
@@ -139,17 +145,77 @@ def test_generation_rejects_a_material_statement_that_the_teacher_did_not_choose
     assert store.list_generated_lesson_plans() == []
 
 
-def test_generation_requires_both_topics_and_never_turns_unknown_progress_into_a_fact(db):
+def test_generation_requires_both_topics_and_rejects_independent_unknown_progress_claims(db):
     student = _student()
     material = _selected_material(student["id"])
     raw = _candidate(material["id"], material["statements"][0]["id"])
     raw["activities"] = raw["activities"][:1]
     raw["school_progress"] = "学校已讲完函数性质"
 
-    with pytest.raises(ValueError, match="school_progress"):
+    with pytest.raises(ValueError, match="独立的学校进度声明"):
         generated_lesson_plans.generate(
             student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
                             "math_minutes": 80, "old_knowledge_weak": False}, _client(raw),
         )
 
     assert store.list_generated_lesson_plans() == []
+
+
+def test_generation_sends_a_minimal_student_context_without_identity_or_storage_metadata(db):
+    student = _student()
+    material = _selected_material(student["id"])
+    captured = {}
+
+    generated_lesson_plans.generate(
+        student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
+                        "math_minutes": 80, "old_knowledge_weak": False},
+        _client(_candidate(material["id"], material["statements"][0]["id"]), captured=captured),
+    )
+
+    student_context = generated_lesson_plans._student_context(student)
+    assert student_context == {
+        "grade": "高一", "subject": "数学",
+        "observed_errors": ["集合条件代入后仍会漏看不等式方向"],
+        "independent_tasks": ["能独立写一元一次不等式的变形理由"],
+        "assumptions": [{"id": "school_progress", "kind": "school_progress", "source": "teacher_profile",
+                         "status": "unknown", "known_content": []}],
+    }
+    prompt = captured["messages"][1]["content"]
+    assert "小林" not in prompt
+    assert "created_at" not in prompt
+
+
+def test_generation_fails_without_reported_usage_instead_of_persisting_zero_tokens(db):
+    student = _student()
+    material = _selected_material(student["id"])
+
+    with pytest.raises(ValueError, match="模型用量缺失"):
+        generated_lesson_plans.generate(
+            student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
+                            "math_minutes": 80, "old_knowledge_weak": False},
+            _client(_candidate(material["id"], material["statements"][0]["id"]), usage=None),
+        )
+
+    assert store.list_generated_lesson_plans() == []
+
+
+def test_manual_edit_save_persists_only_editable_fields_and_preserves_provenance(db):
+    student = _student()
+    material = _selected_material(student["id"])
+    original = generated_lesson_plans.generate(
+        student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
+                        "math_minutes": 80, "old_knowledge_weak": False},
+        _client(_candidate(material["id"], material["statements"][0]["id"])),
+    )
+    edits = [dict(activity) for activity in original["activities"]]
+    edits[0]["title"] = "集合检查（教师改写）"
+    edits[0]["student_task"] = "先代入，再写每一步理由。"
+    edits[0]["material_basis"] = []
+
+    saved = generated_lesson_plans.save_manual_edits(original["id"], {
+        "title": "更新后的备课稿", "activities": edits,
+    })
+
+    assert saved["title"] == "更新后的备课稿"
+    assert saved["activities"][0]["student_task"] == "先代入，再写每一步理由。"
+    assert saved["activities"][0]["material_basis"] == original["activities"][0]["material_basis"]

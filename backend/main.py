@@ -167,6 +167,14 @@ class LessonPlanGenerate(BaseModel):
     old_knowledge_weak: bool = False
 
 
+class GeneratedLessonPlanUpdate(BaseModel):
+    """普通人工编辑保存；候选结构与来源仍由服务层保护。"""
+    model_config = ConfigDict(strict=True)
+
+    title: str
+    activities: list
+
+
 # ---------- LLM client 工厂 ----------
 
 def get_llm_client():
@@ -262,6 +270,14 @@ def get_generated_lesson_plan_teacher_manuscript_route(lesson_plan_id: int) -> d
     if plan is None:
         raise HTTPException(status_code=404, detail=f"备课稿 {lesson_plan_id} 不存在")
     return plan
+
+
+@app.put("/lesson-plans/{lesson_plan_id}")
+def save_generated_lesson_plan_route(lesson_plan_id: int, body: GeneratedLessonPlanUpdate) -> dict:
+    saved = generated_lesson_plans.save_manual_edits(lesson_plan_id, body.model_dump())
+    if saved is None:
+        raise HTTPException(status_code=404, detail=f"备课稿 {lesson_plan_id} 不存在")
+    return saved
 
 def _get_lesson_plan_example_or_404(example_id: str) -> dict:
     example = lesson_plans.teacher_manuscript(example_id)

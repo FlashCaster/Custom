@@ -474,18 +474,16 @@ def _generated_lesson_plan_to_dict(row: sqlite3.Row) -> dict:
     }
 
 
-def create_generated_lesson_plan(record: dict, path: Path | None = None) -> int:
-    """保存已通过服务层验证的真实备课候选；不承担模型或活动语义校验。"""
-    with _conn(path) as conn:
-        cur = conn.execute(
-            "INSERT INTO generated_lesson_plans(student_id, title, course_objective, total_minutes, "
-            "math_minutes, old_knowledge_weak, material_context, activities, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-            (record["student_id"], record["title"], record["course_objective"], record["total_minutes"],
-             record["math_minutes"], int(record["old_knowledge_weak"]),
-             json.dumps(record["material_context"], ensure_ascii=False),
-             json.dumps(record["activities"], ensure_ascii=False), _now()),
-        )
-        return cur.lastrowid
+def _insert_generated_lesson_plan(conn: sqlite3.Connection, record: dict) -> int:
+    cur = conn.execute(
+        "INSERT INTO generated_lesson_plans(student_id, title, course_objective, total_minutes, "
+        "math_minutes, old_knowledge_weak, material_context, activities, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (record["student_id"], record["title"], record["course_objective"], record["total_minutes"],
+         record["math_minutes"], int(record["old_knowledge_weak"]),
+         json.dumps(record["material_context"], ensure_ascii=False),
+         json.dumps(record["activities"], ensure_ascii=False), _now()),
+    )
+    return cur.lastrowid
 
 
 def get_generated_lesson_plan(lesson_plan_id: int, path: Path | None = None) -> dict | None:
@@ -505,37 +503,31 @@ def list_generated_lesson_plans(student_id: int | None = None, path: Path | None
     return [_generated_lesson_plan_to_dict(row) for row in rows]
 
 
-def create_generation_usage_record(lesson_plan_id: int, usage: dict, model: str,
-                                   path: Path | None = None) -> dict:
-    with _conn(path) as conn:
-        cur = conn.execute(
-            "INSERT INTO lesson_plan_generation_usage(lesson_plan_id, model, prompt_tokens, completion_tokens, "
-            "total_tokens, created_at) VALUES(?,?,?,?,?,?)",
-            (lesson_plan_id, model, usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"], _now()),
-        )
-        row = conn.execute("SELECT * FROM lesson_plan_generation_usage WHERE id=?", (cur.lastrowid,)).fetchone()
-    return dict(row)
-
-
 def create_generated_lesson_plan_with_usage(record: dict, usage: dict, model: str,
                                              path: Path | None = None) -> int:
     """在同一事务中写入已验证候选及本次模型用量，避免半条生成记录。"""
     with _conn(path) as conn:
-        cur = conn.execute(
-            "INSERT INTO generated_lesson_plans(student_id, title, course_objective, total_minutes, "
-            "math_minutes, old_knowledge_weak, material_context, activities, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-            (record["student_id"], record["title"], record["course_objective"], record["total_minutes"],
-             record["math_minutes"], int(record["old_knowledge_weak"]),
-             json.dumps(record["material_context"], ensure_ascii=False),
-             json.dumps(record["activities"], ensure_ascii=False), _now()),
-        )
-        lesson_plan_id = cur.lastrowid
+        lesson_plan_id = _insert_generated_lesson_plan(conn, record)
         conn.execute(
             "INSERT INTO lesson_plan_generation_usage(lesson_plan_id, model, prompt_tokens, completion_tokens, "
             "total_tokens, created_at) VALUES(?,?,?,?,?,?)",
             (lesson_plan_id, model, usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"], _now()),
         )
     return lesson_plan_id
+
+
+def update_generated_lesson_plan_record(lesson_plan_id: int, title: str, activities: list,
+                                        path: Path | None = None) -> dict | None:
+    """更新服务层已筛选出的人工编辑字段；来源和用量记录不受影响。"""
+    with _conn(path) as conn:
+        cur = conn.execute(
+            "UPDATE generated_lesson_plans SET title=?, activities=? WHERE id=?",
+            (title, json.dumps(activities, ensure_ascii=False), lesson_plan_id),
+        )
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute("SELECT * FROM generated_lesson_plans WHERE id=?", (lesson_plan_id,)).fetchone()
+    return _generated_lesson_plan_to_dict(row)
 
 
 def list_generation_usage_records(lesson_plan_id: int | None = None, path: Path | None = None) -> list[dict]:

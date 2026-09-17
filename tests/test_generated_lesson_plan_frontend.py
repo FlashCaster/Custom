@@ -9,4 +9,7 @@ def test_preparation_page_has_an_explicit_generation_action_and_editable_candida
     assert "lesson-plans/generate" in source
     assert "生成可编辑候选" in source
     assert "function renderGeneratedLessonPlan" in source
+    assert "saveGeneratedLessonPlan" in source
+    assert 'method: "PUT"' in source
+    assert "学校进度：未知" in source
     assert ".innerHTML =" not in source

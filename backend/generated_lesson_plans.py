@@ -12,7 +12,10 @@ _TEXT_FIELDS = (
     "title", "student_task", "answer_space", "feedback_record", "teacher_observation",
     "teacher_prompt", "answer_check", "stuck_support",
 )
+_EDITABLE_ACTIVITY_FIELDS = ("title", *_TEXT_FIELDS[1:])
 _TOPICS = {"sets_inequalities", "function_concept"}
+_PROGRESS_ASSUMPTION = "school_progress"
+_INDEPENDENT_PROGRESS_FIELDS = {"school_progress", "school_progress_status", "progress_statement"}
 _SYSTEM = (
     "你是高中一对一数学教师的备课助手。只输出 JSON，不要 Markdown 或解释。输出是待教师编辑和确认的候选，"
     "不是课堂事实。只能使用提供的已选择、实际已读材料内容及已选择的材料表述；不得引用未读页，"
@@ -53,6 +56,42 @@ def _request(data: dict) -> dict:
         raise ValueError("old_knowledge_weak 必须是布尔值")
     return {"course_objective": _text(data.get("course_objective"), "course_objective", 500),
             "total_minutes": total, "math_minutes": math, "old_knowledge_weak": weak}
+
+
+def _progress_assumptions(student: dict) -> list[dict]:
+    """学校进度是唯一允许的结构化进度依据，不接受模型自由文字声明。"""
+    status = student["school_progress_status"]
+    known_content = [] if status == "unknown" else [student["school_progress"]]
+    return [{"id": _PROGRESS_ASSUMPTION, "kind": "school_progress", "source": "teacher_profile",
+             "status": status, "known_content": known_content}]
+
+
+def _student_context(student: dict) -> dict:
+    """模型只需教学决策相关事实；身份与持久化元数据永不进入提示词。"""
+    return {
+        "grade": student["grade"], "subject": student["subject"],
+        "observed_errors": student["observed_errors"], "independent_tasks": student["independent_tasks"],
+        "assumptions": _progress_assumptions(student),
+    }
+
+
+def _reject_independent_progress_fields(value) -> None:
+    """检查结构键而非自由文本；学校进度只能出现在 assumptions 的受限结构内。"""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in _INDEPENDENT_PROGRESS_FIELDS:
+                raise ValueError("候选不得返回独立的学校进度声明")
+            _reject_independent_progress_fields(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _reject_independent_progress_fields(nested)
+
+
+def _validate_assumptions(value, student: dict) -> list[dict]:
+    expected = _progress_assumptions(student)
+    if value != expected:
+        raise ValueError("候选 assumptions 必须与教师档案中的学校进度依据完全一致")
+    return expected
 
 
 def _material_context(student_id: int) -> list[dict]:
@@ -129,6 +168,9 @@ def _validate_activity(raw, position: int, pages: dict[tuple[int, int], str],
     if not set(statement_ids).issubset(selected_statement_ids):
         raise ValueError("活动只能采用教师已选择的材料表述")
     out["selected_statement_ids"] = statement_ids
+    if raw.get("assumption_ids") != [_PROGRESS_ASSUMPTION]:
+        raise ValueError("activity.assumption_ids 必须引用学校进度的结构化依据")
+    out["assumption_ids"] = [_PROGRESS_ASSUMPTION]
     out["position"] = position
     return out
 
@@ -137,10 +179,8 @@ def validate_candidate(raw: dict, student: dict, context: list[dict], request: d
     """验证不可信模型候选，并丢弃未声明字段。"""
     if not isinstance(raw, dict):
         raise ValueError("备课候选必须是对象")
-    if raw.get("school_progress_status") != student["school_progress_status"]:
-        raise ValueError("候选不得改变 school_progress_status")
-    if raw.get("school_progress") != student["school_progress"]:
-        raise ValueError("候选不得把 school_progress 写成未经核实的事实")
+    _reject_independent_progress_fields(raw)
+    assumptions = _validate_assumptions(raw.get("assumptions"), student)
     activities = raw.get("activities")
     if not isinstance(activities, list) or not activities:
         raise ValueError("activities 必须是非空列表")
@@ -156,13 +196,18 @@ def validate_candidate(raw: dict, student: dict, context: list[dict], request: d
         raise ValueError("旧知识薄弱时函数活动必须允许推迟，但不得删除")
     if sum(activity["minutes"] for activity in output) > request["math_minutes"]:
         raise ValueError("活动数学时长之和不得超过 math_minutes")
-    return {"title": _text(raw.get("title"), "title", 120), "activities": output}
+    return {"title": _text(raw.get("title"), "title", 120), "activities": output,
+            "assumptions": assumptions}
 
 
 def _usage(response) -> dict:
     usage = getattr(response, "usage", None)
-    prompt = getattr(usage, "prompt_tokens", 0) or 0
-    completion = getattr(usage, "completion_tokens", 0) or 0
+    if usage is None:
+        raise ValueError("模型用量缺失，未保存备课候选")
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    if prompt is None or completion is None:
+        raise ValueError("模型用量缺失，未保存备课候选")
     if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (prompt, completion)):
         raise ValueError("模型用量格式无效")
     return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
@@ -170,13 +215,15 @@ def _usage(response) -> dict:
 
 def _generate_raw(student: dict, request: dict, context: list[dict], client) -> tuple[dict, dict]:
     user = (
-        f"学生档案：{json.dumps(student, ensure_ascii=False)}\n"
+        f"学生档案：{json.dumps(_student_context(student), ensure_ascii=False)}\n"
         f"本次课程：{json.dumps(request, ensure_ascii=False)}\n"
         f"允许使用的材料：{json.dumps(context, ensure_ascii=False)}\n"
-        "输出 JSON: {title, school_progress_status, school_progress, activities}。每个 activity 必含 "
+        "输出 JSON: {title, assumptions, activities}。不得输出 school_progress、school_progress_status 或任何独立进度声明。"
+        "assumptions 必须原样保留学生档案的结构化学校进度依据；每个 activity 必须引用 assumption_ids:[school_progress]。"
+        "每个 activity 必含 "
         "topic(sets_inequalities/function_concept)、title、student_task、answer_space、feedback_record、"
         "teacher_observation、teacher_prompt、answer_check、stuck_support、minutes、"
-        "defer_if_old_knowledge_weak、material_basis([{material_id,page,locator}])、selected_statement_ids。"
+        "defer_if_old_knowledge_weak、material_basis([{material_id,page,locator}])、selected_statement_ids、assumption_ids。"
         "若 old_knowledge_weak 为 true，保留函数活动并标记可推迟。"
     )
     response = client.chat.completions.create(
@@ -210,7 +257,8 @@ def generate(student_id: int, data: dict, client) -> dict:
         "old_knowledge_weak": request["old_knowledge_weak"], "material_context": context,
         "activities": candidate["activities"],
     }, usage, MODEL)
-    return {**store.get_generated_lesson_plan(plan_id), "usage": usage, "label": "待教师编辑的候选"}
+    return {**store.get_generated_lesson_plan(plan_id), "usage": usage, "assumptions": candidate["assumptions"],
+            "label": "待教师编辑的候选"}
 
 
 def teacher_manuscript(lesson_plan_id: int) -> dict | None:
@@ -218,6 +266,38 @@ def teacher_manuscript(lesson_plan_id: int) -> dict | None:
     if plan is None:
         return None
     usages = store.list_generation_usage_records(lesson_plan_id)
-    usage = usages[-1] if usages else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    return {**plan, "usage": {key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")},
+    usage = usages[-1] if usages else None
+    student = store.get_student_record(plan["student_id"])
+    if student is None:
+        raise ValueError(f"student {plan['student_id']} 不存在")
+    response_usage = ({key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+                      if usage is not None else None)
+    return {**plan, "usage": response_usage, "assumptions": _progress_assumptions(student),
             "label": "待教师编辑的候选"}
+
+
+def _manual_activities(current: list[dict], submitted) -> list[dict]:
+    if not isinstance(submitted, list) or len(submitted) != len(current):
+        raise ValueError("activities 必须保留现有活动数量和顺序")
+    updated = []
+    for position, (original, edit) in enumerate(zip(current, submitted)):
+        if not isinstance(edit, dict) or edit.get("position") != position:
+            raise ValueError("活动编辑必须保留 position")
+        activity = dict(original)
+        for field in _EDITABLE_ACTIVITY_FIELDS:
+            activity[field] = _text(edit.get(field), f"activity.{field}")
+        updated.append(activity)
+    return updated
+
+
+def save_manual_edits(lesson_plan_id: int, data: dict) -> dict | None:
+    """仅保存教师普通文字编辑；不引入局部 AI 修改、差异预览或版本恢复。"""
+    if not isinstance(data, dict):
+        raise ValueError("备课稿保存请求必须是对象")
+    current = store.get_generated_lesson_plan(lesson_plan_id)
+    if current is None:
+        return None
+    title = _text(data.get("title"), "title", 120)
+    activities = _manual_activities(current["activities"], data.get("activities"))
+    store.update_generated_lesson_plan_record(lesson_plan_id, title, activities)
+    return teacher_manuscript(lesson_plan_id)

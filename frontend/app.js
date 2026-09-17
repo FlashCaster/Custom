@@ -381,18 +381,45 @@ function openGeneratedLessonPlan(plan) {
 
 function renderGeneratedLessonPlan() {
   const plan = state.generatedLessonPlan;
-  const usage = plan.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const usage = plan.usage;
+  const progressAssumption = (plan.assumptions || []).find((item) => item.id === "school_progress");
+  const progress = !progressAssumption || progressAssumption.status === "unknown"
+    ? "学校进度：未知" : `学校进度：${progressAssumption.known_content.join("；")}`;
+  const title = el("input", { class: "text-input", value: plan.title });
+  title.addEventListener("input", () => { plan.title = title.value; });
+  const hint = el("span", { class: "hint info" });
+  const save = el("button", { class: "btn-primary" }, ["保存备课稿"]);
+  save.addEventListener("click", () => saveGeneratedLessonPlan(save, hint));
+  const back = el("button", { class: "ghost-btn" }, ["返回备课资料"]);
+  back.addEventListener("click", () => enterPreparation().catch(showLessonPlanError));
   const header = el("div", { class: "lesson-plan-head" }, [
     el("div", {}, [
       el("span", { class: "badge" }, [plan.label]),
-      el("h2", { class: "section-title", style: "margin:10px 0 0" }, [plan.title]),
-      el("p", { class: "meta-line" }, [`本次生成用量：${usage.total_tokens} tokens`]),
+      title,
+      el("p", { class: "meta-line" }, [progress]),
+      el("p", { class: "meta-line" }, [usage ? `本次生成用量：${usage.total_tokens} tokens` : "本次生成用量：未知"]),
     ]),
-    el("button", { class: "ghost-btn" }, ["返回备课资料"]),
+    el("div", { class: "card-head" }, [hint, save, back]),
   ]);
-  header.lastChild.addEventListener("click", () => enterPreparation().catch(showLessonPlanError));
   const activities = plan.activities.map((activity) => renderGeneratedActivityEditor(activity));
   renderMain(el("div", { class: "container" }, [header, ...activities]));
+}
+
+async function saveGeneratedLessonPlan(button, hint) {
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    state.generatedLessonPlan = await api(`/lesson-plans/${state.generatedLessonPlan.id}`, {
+      method: "PUT",
+      body: { title: state.generatedLessonPlan.title, activities: state.generatedLessonPlan.activities },
+    });
+    renderGeneratedLessonPlan();
+  } catch (error) {
+    hint.className = "hint";
+    hint.textContent = `保存失败：${error.detail || error}`;
+    button.disabled = false;
+    button.textContent = "保存备课稿";
+  }
 }
 
 function renderGeneratedActivityEditor(activity) {
