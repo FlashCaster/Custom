@@ -8,7 +8,6 @@ from backend import store
 
 MODEL = "deepseek-chat"
 MAX_TOKENS = 3000
-VERIFIER_MAX_TOKENS = 800
 _TEXT_FIELDS = (
     "title", "student_task", "answer_space", "feedback_record", "teacher_observation",
     "teacher_prompt", "answer_check", "stuck_support",
@@ -16,18 +15,14 @@ _TEXT_FIELDS = (
 _EDITABLE_ACTIVITY_FIELDS = ("title", *_TEXT_FIELDS[1:])
 _TOPICS = {"sets_inequalities", "function_concept"}
 _PROGRESS_ASSUMPTION = "school_progress"
-_INDEPENDENT_PROGRESS_FIELDS = {"school_progress", "school_progress_status", "progress_statement"}
+_CANDIDATE_FIELDS = {"activities"}
+_ACTIVITY_FIELDS = {"topic", "minutes", "defer_if_old_knowledge_weak", "material_basis", "selected_statement_ids"}
+_BASIS_FIELDS = {"material_id", "page", "locator"}
 _SYSTEM = (
-    "你是高中一对一数学教师的备课助手。只输出 JSON，不要 Markdown 或解释。输出是待教师编辑和确认的候选，"
-    "不是课堂事实。只能使用提供的已选择、实际已读材料内容及已选择的材料表述；不得引用未读页，"
-    "不得把学校进度未知写成学生已经学习过任何内容。必须保留集合与不等式检查及函数概念活动。"
-)
-_VERIFIER_SYSTEM = (
-    "你是备课候选的语义安全核验器。只输出严格 JSON，不要 Markdown 或解释。核验所有候选正文是否把学校进度"
-    "未知当作事实，或是否声称学生学习过教师档案未明确记录的内容。学校进度和学习内容只能以给定的"
-    "teacher_profile 结构化 assumptions 为事实依据；材料内容不是学校教学进度事实。"
-    "输出必须严格为 {verdict,activity_position,field,reason}：通过时 verdict=pass 且后三项都为 null；"
-    "不通过时 verdict=fail，activity_position 是有问题活动的 0 起位置，field 是对应正文栏位，reason 是简短原因。"
+    "你是高中一对一数学备课的活动规划器。只输出 JSON，不要 Markdown 或解释。你只能输出 "
+    "{activities:[...]}；每个 activity 只允许 topic、minutes、defer_if_old_knowledge_weak、"
+    "material_basis、selected_statement_ids 五个字段。不得输出标题、任务、答案、观察、追问、学生状态、"
+    "学校进度或任何其他文本。material_basis 必须选用提供的已核准材料来源。必须保留集合与不等式检查及函数概念活动。"
 )
 
 
@@ -83,25 +78,6 @@ def _student_context(student: dict) -> dict:
     }
 
 
-def _reject_independent_progress_fields(value) -> None:
-    """检查结构键而非自由文本；学校进度只能出现在 assumptions 的受限结构内。"""
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if key in _INDEPENDENT_PROGRESS_FIELDS:
-                raise ValueError("候选不得返回独立的学校进度声明")
-            _reject_independent_progress_fields(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            _reject_independent_progress_fields(nested)
-
-
-def _validate_assumptions(value, student: dict) -> list[dict]:
-    expected = _progress_assumptions(student)
-    if value != expected:
-        raise ValueError("候选 assumptions 必须与教师档案中的学校进度依据完全一致")
-    return expected
-
-
 def _material_context(student_id: int) -> list[dict]:
     selections = store.list_material_selection_records(student_id)
     if not selections:
@@ -143,11 +119,12 @@ def _validate_activity(raw, position: int, pages: dict[tuple[int, int], str],
                        selected_statement_ids: set[int], math_minutes: int) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("每个 activity 必须是对象")
+    if set(raw) != _ACTIVITY_FIELDS:
+        raise ValueError("activity 包含不允许字段")
     topic = raw.get("topic")
     if topic not in _TOPICS:
         raise ValueError("activity.topic 必须是 sets_inequalities 或 function_concept")
-    out = {field: _text(raw.get(field), f"activity.{field}") for field in _TEXT_FIELDS}
-    out["topic"] = topic
+    out = {"topic": topic}
     out["minutes"] = _positive_int(raw.get("minutes"), "activity.minutes", math_minutes)
     defer = raw.get("defer_if_old_knowledge_weak")
     if not isinstance(defer, bool):
@@ -160,6 +137,8 @@ def _validate_activity(raw, position: int, pages: dict[tuple[int, int], str],
     for basis in bases:
         if not isinstance(basis, dict):
             raise ValueError("activity.material_basis 项必须是对象")
+        if set(basis) != _BASIS_FIELDS:
+            raise ValueError("activity.material_basis 包含不允许字段")
         material_id, page = basis.get("material_id"), basis.get("page")
         if (isinstance(material_id, bool) or not isinstance(material_id, int) or isinstance(page, bool)
                 or not isinstance(page, int) or (material_id, page) not in pages):
@@ -176,24 +155,54 @@ def _validate_activity(raw, position: int, pages: dict[tuple[int, int], str],
     if not set(statement_ids).issubset(selected_statement_ids):
         raise ValueError("活动只能采用教师已选择的材料表述")
     out["selected_statement_ids"] = statement_ids
-    if raw.get("assumption_ids") != [_PROGRESS_ASSUMPTION]:
-        raise ValueError("activity.assumption_ids 必须引用学校进度的结构化依据")
-    out["assumption_ids"] = [_PROGRESS_ASSUMPTION]
     out["position"] = position
     return out
 
 
+def _source_text(activity: dict) -> str:
+    return "；".join(f"“{basis['locator']}”" for basis in activity["material_basis"])
+
+
+def _template_activity(activity: dict) -> dict:
+    """把不可信规划投影为固定教学文本；只有已验证的来源定位可嵌入正文。"""
+    source = _source_text(activity)
+    if activity["topic"] == "sets_inequalities":
+        fields = {
+            "title": "集合与不等式检查",
+            "student_task": "根据已核准材料中的条件，完成集合与不等式判断并写出每一步依据。",
+            "answer_space": "判断：____________________\n理由：____________________",
+            "feedback_record": "我在哪一步不确定：____________________",
+            "teacher_observation": "观察条件代入、不等式方向核对和理由书写。",
+            "teacher_prompt": "你代入了哪个条件？不等式方向需要怎样核对？",
+            "answer_check": f"核查标准：对照已核准材料定位{source}，逐项检查条件与判断理由。",
+            "stuck_support": "先圈出变量与条件，再逐步代入并记录每一步。",
+        }
+    else:
+        fields = {
+            "title": "函数概念判断",
+            "student_task": "根据已核准材料的函数概念表述，判断输入和输出关系并写出理由。",
+            "answer_space": "判断：____________________\n理由：____________________",
+            "feedback_record": "我检查的输入和输出：____________________",
+            "teacher_observation": "观察输入是否逐项核对，以及理由是否写完整。",
+            "teacher_prompt": "请逐个检查输入；每个输入对应了几个输出？",
+            "answer_check": f"核查标准：对照已核准材料定位{source}，检查每个输入与输出的对应关系。",
+            "stuck_support": "先把关系写成输入和输出的配对，再逐项核对。",
+        }
+    return {**activity, **fields}
+
+
 def validate_candidate(raw: dict, student: dict, context: list[dict], request: dict) -> dict:
-    """验证不可信模型候选，并丢弃未声明字段。"""
+    """验证受限活动规划，并投影为应用拥有的确定性教学文本。"""
     if not isinstance(raw, dict):
         raise ValueError("备课候选必须是对象")
-    _reject_independent_progress_fields(raw)
-    assumptions = _validate_assumptions(raw.get("assumptions"), student)
+    if set(raw) != _CANDIDATE_FIELDS:
+        raise ValueError("候选字段不受允许")
     activities = raw.get("activities")
     if not isinstance(activities, list) or not activities:
         raise ValueError("activities 必须是非空列表")
     pages, selected_statement_ids = _source_index(context)
-    output = [_validate_activity(item, position, pages, selected_statement_ids, request["math_minutes"])
+    output = [_template_activity(_validate_activity(item, position, pages, selected_statement_ids,
+                                                     request["math_minutes"]))
               for position, item in enumerate(activities)]
     topics = {activity["topic"] for activity in output}
     if topics != _TOPICS:
@@ -204,8 +213,8 @@ def validate_candidate(raw: dict, student: dict, context: list[dict], request: d
         raise ValueError("旧知识薄弱时函数活动必须允许推迟，但不得删除")
     if sum(activity["minutes"] for activity in output) > request["math_minutes"]:
         raise ValueError("活动数学时长之和不得超过 math_minutes")
-    return {"title": _text(raw.get("title"), "title", 120), "activities": output,
-            "assumptions": assumptions}
+    return {"title": f"{student['grade']}{student['subject']}备课稿", "activities": output,
+            "assumptions": _progress_assumptions(student)}
 
 
 def _usage(response) -> dict:
@@ -243,56 +252,16 @@ def _generate_raw(student: dict, request: dict, context: list[dict], client) -> 
         f"学生档案：{json.dumps(_student_context(student), ensure_ascii=False)}\n"
         f"本次课程：{json.dumps(request, ensure_ascii=False)}\n"
         f"允许使用的材料：{json.dumps(context, ensure_ascii=False)}\n"
-        "输出 JSON: {title, assumptions, activities}。不得输出 school_progress、school_progress_status 或任何独立进度声明。"
-        "assumptions 必须原样保留学生档案的结构化学校进度依据；每个 activity 必须引用 assumption_ids:[school_progress]。"
-        "每个 activity 必含 "
-        "topic(sets_inequalities/function_concept)、title、student_task、answer_space、feedback_record、"
-        "teacher_observation、teacher_prompt、answer_check、stuck_support、minutes、"
-        "defer_if_old_knowledge_weak、material_basis([{material_id,page,locator}])、selected_statement_ids、assumption_ids。"
+        "输出 JSON 仅含 activities。每个 activity 仅含 topic(sets_inequalities/function_concept)、minutes、"
+        "defer_if_old_knowledge_weak、material_basis([{material_id,page,locator}])、selected_statement_ids。"
+        "不要输出任何标题、学生任务、答案、观察、追问、学校进度、学生状态或其他文字。"
         "若 old_knowledge_weak 为 true，保留函数活动并标记可推迟。"
     )
     return _call_json(client, _SYSTEM, user, MAX_TOKENS)
 
 
-def _validate_verdict(raw: dict, activity_count: int) -> dict:
-    required = {"verdict", "activity_position", "field", "reason"}
-    if set(raw) != required or raw.get("verdict") not in ("pass", "fail"):
-        raise ValueError("verifier verdict 必须是严格的 pass/fail 结构")
-    if raw["verdict"] == "pass":
-        if any(raw[field] is not None for field in ("activity_position", "field", "reason")):
-            raise ValueError("verifier verdict=pass 时不得包含违规定位")
-        return raw
-    position, field, reason = raw["activity_position"], raw["field"], raw["reason"]
-    if (isinstance(position, bool) or not isinstance(position, int) or not 0 <= position < activity_count
-            or field not in _TEXT_FIELDS or not isinstance(reason, str) or not reason.strip()):
-        raise ValueError("verifier verdict=fail 必须提供合法活动、字段和原因")
-    return raw
-
-
-def _verify_candidate(candidate: dict, student: dict, verifier) -> tuple[dict, dict]:
-    if verifier is None:
-        raise ValueError("语义 verifier 未配置，未保存备课候选")
-    teacher_profile = {
-        "assumptions": _progress_assumptions(student),
-        "observed_errors": student["observed_errors"],
-        "independent_tasks": student["independent_tasks"],
-    }
-    user = (
-        f"teacher_profile：{json.dumps(teacher_profile, ensure_ascii=False)}\n"
-        f"candidate：{json.dumps(candidate, ensure_ascii=False)}\n"
-        "核验候选全部正文，按规定返回 verdict。"
-    )
-    raw, usage = _call_json(verifier, _VERIFIER_SYSTEM, user, VERIFIER_MAX_TOKENS)
-    return _validate_verdict(raw, len(candidate["activities"])), usage
-
-
-def _combined_usage(generation: dict, verification: dict) -> dict:
-    return {key: generation[key] + verification[key]
-            for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
-
-
-def generate(student_id: int, data: dict, client, verifier=None) -> dict:
-    """一次主动生成串行完成候选和 fail-closed 语义核验，成功后才写候选稿与合计用量。"""
+def generate(student_id: int, data: dict, client) -> dict:
+    """一次主动生成只接受受限活动规划；完整教师稿由应用模板确定性生成。"""
     if isinstance(student_id, bool) or not isinstance(student_id, int):
         raise ValueError("student_id 必须是整数")
     student = store.get_student_record(student_id)
@@ -302,10 +271,6 @@ def generate(student_id: int, data: dict, client, verifier=None) -> dict:
     context = _material_context(student_id)
     raw, usage = _generate_raw(student, request, context, client)
     candidate = validate_candidate(raw, student, context, request)
-    verdict, verifier_usage = _verify_candidate(candidate, student, verifier)
-    if verdict["verdict"] == "fail":
-        raise ValueError(f"语义 verifier 拒绝活动 {verdict['activity_position']} 的 {verdict['field']}：{verdict['reason']}")
-    usage = _combined_usage(usage, verifier_usage)
     plan_id = store.create_generated_lesson_plan_with_usage({
         "student_id": student_id, "title": candidate["title"], "course_objective": request["course_objective"],
         "total_minutes": request["total_minutes"], "math_minutes": request["math_minutes"],

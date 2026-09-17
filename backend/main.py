@@ -190,11 +190,6 @@ def get_llm_client():
     return OpenAI(api_key=key, base_url="https://api.deepseek.com")
 
 
-def get_lesson_plan_verifier():
-    """独立依赖点，便于为语义核验替换模型或注入无网络测试替身。"""
-    return get_llm_client()
-
-
 # ---------- lesson plan examples ----------
 
 # ---------- preparation inputs ----------
@@ -259,10 +254,10 @@ def choose_reference_statement_route(student_id: int, statement_id: int) -> dict
 
 @app.post("/students/{student_id}/lesson-plans/generate", status_code=201)
 def generate_lesson_plan_route(student_id: int, body: LessonPlanGenerate,
-                               client=Depends(get_llm_client), verifier=Depends(get_lesson_plan_verifier)) -> dict:
+                               client=Depends(get_llm_client)) -> dict:
     """仅由教师主动请求触发模型，未通过候选校验不写入备课稿。"""
     try:
-        return generated_lesson_plans.generate(student_id, body.model_dump(), client, verifier)
+        return generated_lesson_plans.generate(student_id, body.model_dump(), client)
     except ValueError:
         raise
     except Exception as exc:  # noqa: BLE001 - 将模型/网络失败保持在 API 边界

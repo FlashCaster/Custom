@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import store
-from backend.main import app, get_lesson_plan_verifier, get_llm_client
+from backend.main import app, get_llm_client
 
 
 _BASE = Path(__file__).resolve().parent.parent / "data" / ".test_dbs"
@@ -52,32 +52,14 @@ def _material(api, student_id):
 
 def _fake_client(material_id, statement_id):
     basis = [{"material_id": material_id, "page": 1, "locator": "每一个输入恰好对应一个输出"}]
-    fields = {"answer_space": "作答区", "feedback_record": "记录区", "teacher_observation": "观察点",
-              "teacher_prompt": "追问", "answer_check": "核查依据", "stuck_support": "卡住处理",
-              "minutes": 15, "material_basis": basis, "selected_statement_ids": [statement_id],
-              "assumption_ids": ["school_progress"]}
-    payload = {"title": "集合与函数备课稿",
-               "assumptions": [{"id": "school_progress", "kind": "school_progress", "source": "teacher_profile",
-                                "status": "unknown", "known_content": []}],
-               "activities": [
-                   {**fields, "topic": "sets_inequalities", "title": "集合与不等式检查", "student_task": "写判断理由",
-                    "defer_if_old_knowledge_weak": False},
-                   {**fields, "topic": "function_concept", "title": "函数概念", "student_task": "判断函数并写理由",
-                    "defer_if_old_knowledge_weak": True},
-               ]}
+    fields = {"minutes": 15, "material_basis": basis, "selected_statement_ids": [statement_id]}
+    payload = {"activities": [
+        {**fields, "topic": "sets_inequalities", "defer_if_old_knowledge_weak": False},
+        {**fields, "topic": "function_concept", "defer_if_old_knowledge_weak": True},
+    ]}
     response = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)))],
         usage=SimpleNamespace(prompt_tokens=8, completion_tokens=13),
-    )
-    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: response)))
-
-
-def _fake_verifier():
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-            "verdict": "pass", "activity_position": None, "field": None, "reason": None,
-        })))],
-        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=3),
     )
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: response)))
 
@@ -86,7 +68,6 @@ def test_teacher_generates_a_real_candidate_only_by_clicking_the_generation_endp
     student = _student(api)
     material = _material(api, student["id"])
     app.dependency_overrides[get_llm_client] = lambda: _fake_client(material["id"], material["statements"][0]["id"])
-    app.dependency_overrides[get_lesson_plan_verifier] = _fake_verifier
 
     generated = api.post(f"/students/{student['id']}/lesson-plans/generate", json={
         "course_objective": "先检查集合与不等式，再视情况进入函数概念", "total_minutes": 120,
@@ -95,7 +76,7 @@ def test_teacher_generates_a_real_candidate_only_by_clicking_the_generation_endp
 
     assert generated.status_code == 201
     plan = generated.json()
-    assert plan["usage"]["total_tokens"] == 26
+    assert plan["usage"]["total_tokens"] == 21
     assert plan["activities"][1]["defer_if_old_knowledge_weak"] is True
     fetched = api.get(f"/lesson-plans/{plan['id']}/teacher-manuscript")
     assert fetched.status_code == 200
