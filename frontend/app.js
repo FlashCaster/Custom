@@ -83,6 +83,7 @@ const state = {
   lessonPlanMode: "teacher",
   lessonPlanEditing: false,
   preparation: null,
+  generatedLessonPlan: null,
 };
 
 function flatTasks(path) {
@@ -164,7 +165,9 @@ function renderPreparation() {
   ];
   if (selected) content.push(renderSelectedStudent(selected));
   content.push(renderMaterialForm(), renderPastedMaterialForm());
-  if (selected) content.push(renderMaterialSelections(selected), renderStatementChoices(selected));
+  if (selected) content.push(
+    renderMaterialSelections(selected), renderStatementChoices(selected), renderLessonPlanGeneration(selected),
+  );
   renderMain(el("div", { class: "container" }, content));
 }
 
@@ -330,6 +333,92 @@ function renderStatementChoices(student) {
     ]);
   });
   return el("section", { class: "card" }, [el("h2", { class: "section-title" }, ["材料表述"]), ...rows]);
+}
+
+function renderLessonPlanGeneration(student) {
+  const objective = el("textarea", { class: "text-input", rows: 2,
+    placeholder: "本次课程目标，例如：先检查集合与不等式，再视情况进入函数概念" });
+  const total = el("input", { class: "text-input", type: "number", min: "1", value: "120" });
+  const math = el("input", { class: "text-input", type: "number", min: "1", value: "80" });
+  const weak = el("input", { type: "checkbox" });
+  const weakLabel = el("label", { class: "check-row" }, [weak, el("span", { class: "check-box" }),
+    el("span", {}, ["旧知识明显薄弱，优先补足并允许推迟函数"])]);
+  const hint = el("span", { class: "hint info" });
+  const generate = el("button", { class: "btn-primary" }, ["生成可编辑候选"]);
+  generate.addEventListener("click", async () => {
+    generate.disabled = true;
+    generate.textContent = "正在生成…";
+    hint.textContent = "";
+    try {
+      const plan = await api(`/students/${student.id}/lesson-plans/generate`, { method: "POST", body: {
+        course_objective: objective.value, total_minutes: Number(total.value), math_minutes: Number(math.value),
+        old_knowledge_weak: weak.checked,
+      }});
+      openGeneratedLessonPlan(plan);
+    } catch (error) {
+      hint.className = "hint";
+      hint.textContent = `生成失败：${error.detail || error}`;
+      generate.disabled = false;
+      generate.textContent = "生成可编辑候选";
+    }
+  });
+  return el("section", { class: "card preparation-form" }, [
+    el("h2", { class: "section-title" }, ["生成备课稿"]),
+    el("label", { class: "field-label" }, ["课程目标"]), objective,
+    el("label", { class: "field-label" }, ["总时长（分钟）"]), total,
+    el("label", { class: "field-label" }, ["数学时长（分钟）"]), math,
+    weakLabel, el("div", { class: "input-actions" }, [hint, generate]),
+  ]);
+}
+
+function openGeneratedLessonPlan(plan) {
+  state.view = "generated-lesson-plan";
+  state.generatedLessonPlan = plan;
+  setTopbar(plan.title, false);
+  renderSidebarEmpty("真实备课候选");
+  renderGeneratedLessonPlan();
+}
+
+function renderGeneratedLessonPlan() {
+  const plan = state.generatedLessonPlan;
+  const usage = plan.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const header = el("div", { class: "lesson-plan-head" }, [
+    el("div", {}, [
+      el("span", { class: "badge" }, [plan.label]),
+      el("h2", { class: "section-title", style: "margin:10px 0 0" }, [plan.title]),
+      el("p", { class: "meta-line" }, [`本次生成用量：${usage.total_tokens} tokens`]),
+    ]),
+    el("button", { class: "ghost-btn" }, ["返回备课资料"]),
+  ]);
+  header.lastChild.addEventListener("click", () => enterPreparation().catch(showLessonPlanError));
+  const activities = plan.activities.map((activity) => renderGeneratedActivityEditor(activity));
+  renderMain(el("div", { class: "container" }, [header, ...activities]));
+}
+
+function renderGeneratedActivityEditor(activity) {
+  const fields = [
+    ["student_task", "学生任务"], ["answer_space", "作答区"], ["feedback_record", "学生反馈记录"],
+    ["teacher_observation", "观察点"], ["teacher_prompt", "追问"],
+    ["answer_check", "答案或核查依据"], ["stuck_support", "卡住时的处理办法"],
+  ];
+  const controls = fields.map(([field, label]) => {
+    const input = el("textarea", { class: "text-input", rows: 2 });
+    input.value = activity[field];
+    input.addEventListener("input", () => { activity[field] = input.value; });
+    return [el("label", { class: "field-label" }, [label]), input];
+  }).flat();
+  const defer = activity.topic === "function_concept" && activity.defer_if_old_knowledge_weak
+    ? "旧知识薄弱时可推迟" : "按本次安排进行";
+  return el("section", { class: "card activity-editor" }, [
+    el("p", { class: "crumb" }, [`活动 ${activity.position + 1} · ${activity.minutes} 分钟 · ${defer}`]),
+    el("label", { class: "field-label" }, ["活动标题"]),
+    (() => {
+      const title = el("input", { class: "text-input", value: activity.title });
+      title.addEventListener("input", () => { activity.title = title.value; });
+      return title;
+    })(),
+    ...controls,
+  ]);
 }
 
 const LESSON_PLAN_FIELDS = [

@@ -137,6 +137,27 @@ CREATE TABLE IF NOT EXISTS reference_statement_choices (
     chosen_at TEXT NOT NULL,
     PRIMARY KEY(student_id, topic)
 );
+CREATE TABLE IF NOT EXISTS generated_lesson_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    course_objective TEXT NOT NULL,
+    total_minutes INTEGER NOT NULL,
+    math_minutes INTEGER NOT NULL,
+    old_knowledge_weak INTEGER NOT NULL CHECK (old_knowledge_weak IN (0,1)),
+    material_context TEXT NOT NULL,
+    activities TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lesson_plan_generation_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lesson_plan_id INTEGER NOT NULL REFERENCES generated_lesson_plans(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL,
+    completion_tokens INTEGER NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_paths_goal ON paths(goal_id);
 CREATE INDEX IF NOT EXISTS idx_stages_path ON stages(path_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(stage_id);
@@ -145,6 +166,8 @@ CREATE INDEX IF NOT EXISTS idx_placement_goal ON placement_tests(goal_id);
 CREATE INDEX IF NOT EXISTS idx_conv_task ON conversations(task_id);
 CREATE INDEX IF NOT EXISTS idx_reference_statements_topic ON reference_statements(topic);
 CREATE INDEX IF NOT EXISTS idx_material_selections_student ON material_selections(student_id);
+CREATE INDEX IF NOT EXISTS idx_generated_lesson_plans_student ON generated_lesson_plans(student_id);
+CREATE INDEX IF NOT EXISTS idx_lesson_plan_generation_usage_plan ON lesson_plan_generation_usage(lesson_plan_id);
 """
 
 
@@ -436,6 +459,93 @@ def choose_reference_statement_record(student_id: int, topic: str, statement_id:
 def list_reference_statement_choices(path: Path | None = None) -> list[dict]:
     with _conn(path) as conn:
         rows = conn.execute("SELECT * FROM reference_statement_choices ORDER BY student_id, topic").fetchall()
+    return [dict(row) for row in rows]
+
+
+# ---------- generated lesson plans ----------
+
+def _generated_lesson_plan_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"], "student_id": row["student_id"], "title": row["title"],
+        "course_objective": row["course_objective"], "total_minutes": row["total_minutes"],
+        "math_minutes": row["math_minutes"], "old_knowledge_weak": bool(row["old_knowledge_weak"]),
+        "material_context": json.loads(row["material_context"]), "activities": json.loads(row["activities"]),
+        "created_at": row["created_at"],
+    }
+
+
+def create_generated_lesson_plan(record: dict, path: Path | None = None) -> int:
+    """保存已通过服务层验证的真实备课候选；不承担模型或活动语义校验。"""
+    with _conn(path) as conn:
+        cur = conn.execute(
+            "INSERT INTO generated_lesson_plans(student_id, title, course_objective, total_minutes, "
+            "math_minutes, old_knowledge_weak, material_context, activities, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (record["student_id"], record["title"], record["course_objective"], record["total_minutes"],
+             record["math_minutes"], int(record["old_knowledge_weak"]),
+             json.dumps(record["material_context"], ensure_ascii=False),
+             json.dumps(record["activities"], ensure_ascii=False), _now()),
+        )
+        return cur.lastrowid
+
+
+def get_generated_lesson_plan(lesson_plan_id: int, path: Path | None = None) -> dict | None:
+    with _conn(path) as conn:
+        row = conn.execute("SELECT * FROM generated_lesson_plans WHERE id=?", (lesson_plan_id,)).fetchone()
+    return _generated_lesson_plan_to_dict(row) if row else None
+
+
+def list_generated_lesson_plans(student_id: int | None = None, path: Path | None = None) -> list[dict]:
+    query, params = "SELECT * FROM generated_lesson_plans", ()
+    if student_id is not None:
+        query += " WHERE student_id=?"
+        params = (student_id,)
+    query += " ORDER BY id"
+    with _conn(path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_generated_lesson_plan_to_dict(row) for row in rows]
+
+
+def create_generation_usage_record(lesson_plan_id: int, usage: dict, model: str,
+                                   path: Path | None = None) -> dict:
+    with _conn(path) as conn:
+        cur = conn.execute(
+            "INSERT INTO lesson_plan_generation_usage(lesson_plan_id, model, prompt_tokens, completion_tokens, "
+            "total_tokens, created_at) VALUES(?,?,?,?,?,?)",
+            (lesson_plan_id, model, usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"], _now()),
+        )
+        row = conn.execute("SELECT * FROM lesson_plan_generation_usage WHERE id=?", (cur.lastrowid,)).fetchone()
+    return dict(row)
+
+
+def create_generated_lesson_plan_with_usage(record: dict, usage: dict, model: str,
+                                             path: Path | None = None) -> int:
+    """在同一事务中写入已验证候选及本次模型用量，避免半条生成记录。"""
+    with _conn(path) as conn:
+        cur = conn.execute(
+            "INSERT INTO generated_lesson_plans(student_id, title, course_objective, total_minutes, "
+            "math_minutes, old_knowledge_weak, material_context, activities, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (record["student_id"], record["title"], record["course_objective"], record["total_minutes"],
+             record["math_minutes"], int(record["old_knowledge_weak"]),
+             json.dumps(record["material_context"], ensure_ascii=False),
+             json.dumps(record["activities"], ensure_ascii=False), _now()),
+        )
+        lesson_plan_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO lesson_plan_generation_usage(lesson_plan_id, model, prompt_tokens, completion_tokens, "
+            "total_tokens, created_at) VALUES(?,?,?,?,?,?)",
+            (lesson_plan_id, model, usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"], _now()),
+        )
+    return lesson_plan_id
+
+
+def list_generation_usage_records(lesson_plan_id: int | None = None, path: Path | None = None) -> list[dict]:
+    query, params = "SELECT * FROM lesson_plan_generation_usage", ()
+    if lesson_plan_id is not None:
+        query += " WHERE lesson_plan_id=?"
+        params = (lesson_plan_id,)
+    query += " ORDER BY id"
+    with _conn(path) as conn:
+        rows = conn.execute(query, params).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -781,4 +891,8 @@ def export_all(path: Path | None = None) -> dict:
         result["material_selections"] = selections
         result["reference_citations"] = list_reference_citation_records(path)
         result["reference_statement_choices"] = list_reference_statement_choices(path)
+    plans = list_generated_lesson_plans(path=path)
+    if plans:
+        result["generated_lesson_plans"] = plans
+        result["lesson_plan_generation_usage"] = list_generation_usage_records(path=path)
     return result

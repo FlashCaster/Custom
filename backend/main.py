@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend import checker, lesson_plans, planner, prep, store
+from backend import checker, generated_lesson_plans, lesson_plans, planner, prep, store
 
 
 @asynccontextmanager
@@ -157,6 +157,16 @@ class MaterialSelectionCreate(BaseModel):
     usage_scope: str
 
 
+class LessonPlanGenerate(BaseModel):
+    """真实备课候选生成请求；材料范围来自已保存的教师选择。"""
+    model_config = ConfigDict(strict=True)
+
+    course_objective: str
+    total_minutes: int
+    math_minutes: int
+    old_knowledge_weak: bool = False
+
+
 # ---------- LLM client 工厂 ----------
 
 def get_llm_client():
@@ -232,6 +242,26 @@ def list_material_selections_route(student_id: int) -> list[dict]:
 @app.post("/students/{student_id}/reference-statements/{statement_id}/choose")
 def choose_reference_statement_route(student_id: int, statement_id: int) -> dict:
     return prep.choose_statement(student_id, statement_id)
+
+
+@app.post("/students/{student_id}/lesson-plans/generate", status_code=201)
+def generate_lesson_plan_route(student_id: int, body: LessonPlanGenerate,
+                               client=Depends(get_llm_client)) -> dict:
+    """仅由教师主动请求触发模型，未通过候选校验不写入备课稿。"""
+    try:
+        return generated_lesson_plans.generate(student_id, body.model_dump(), client)
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 将模型/网络失败保持在 API 边界
+        raise HTTPException(status_code=502, detail=f"LLM 调用失败: {exc}") from exc
+
+
+@app.get("/lesson-plans/{lesson_plan_id}/teacher-manuscript")
+def get_generated_lesson_plan_teacher_manuscript_route(lesson_plan_id: int) -> dict:
+    plan = generated_lesson_plans.teacher_manuscript(lesson_plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"备课稿 {lesson_plan_id} 不存在")
+    return plan
 
 def _get_lesson_plan_example_or_404(example_id: str) -> dict:
     example = lesson_plans.teacher_manuscript(example_id)
