@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import store
-from backend.main import app, get_llm_client
+from backend.main import app, get_lesson_plan_verifier, get_llm_client
 
 
 _BASE = Path(__file__).resolve().parent.parent / "data" / ".test_dbs"
@@ -72,10 +72,21 @@ def _fake_client(material_id, statement_id):
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: response)))
 
 
+def _fake_verifier():
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+            "verdict": "pass", "activity_position": None, "field": None, "reason": None,
+        })))],
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=3),
+    )
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: response)))
+
+
 def test_teacher_generates_a_real_candidate_only_by_clicking_the_generation_endpoint(api):
     student = _student(api)
     material = _material(api, student["id"])
     app.dependency_overrides[get_llm_client] = lambda: _fake_client(material["id"], material["statements"][0]["id"])
+    app.dependency_overrides[get_lesson_plan_verifier] = _fake_verifier
 
     generated = api.post(f"/students/{student['id']}/lesson-plans/generate", json={
         "course_objective": "先检查集合与不等式，再视情况进入函数概念", "total_minutes": 120,
@@ -84,7 +95,7 @@ def test_teacher_generates_a_real_candidate_only_by_clicking_the_generation_endp
 
     assert generated.status_code == 201
     plan = generated.json()
-    assert plan["usage"]["total_tokens"] == 21
+    assert plan["usage"]["total_tokens"] == 26
     assert plan["activities"][1]["defer_if_old_knowledge_weak"] is True
     fetched = api.get(f"/lesson-plans/{plan['id']}/teacher-manuscript")
     assert fetched.status_code == 200

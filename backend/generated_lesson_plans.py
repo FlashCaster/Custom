@@ -8,6 +8,7 @@ from backend import store
 
 MODEL = "deepseek-chat"
 MAX_TOKENS = 3000
+VERIFIER_MAX_TOKENS = 800
 _TEXT_FIELDS = (
     "title", "student_task", "answer_space", "feedback_record", "teacher_observation",
     "teacher_prompt", "answer_check", "stuck_support",
@@ -20,6 +21,13 @@ _SYSTEM = (
     "你是高中一对一数学教师的备课助手。只输出 JSON，不要 Markdown 或解释。输出是待教师编辑和确认的候选，"
     "不是课堂事实。只能使用提供的已选择、实际已读材料内容及已选择的材料表述；不得引用未读页，"
     "不得把学校进度未知写成学生已经学习过任何内容。必须保留集合与不等式检查及函数概念活动。"
+)
+_VERIFIER_SYSTEM = (
+    "你是备课候选的语义安全核验器。只输出严格 JSON，不要 Markdown 或解释。核验所有候选正文是否把学校进度"
+    "未知当作事实，或是否声称学生学习过教师档案未明确记录的内容。学校进度和学习内容只能以给定的"
+    "teacher_profile 结构化 assumptions 为事实依据；材料内容不是学校教学进度事实。"
+    "输出必须严格为 {verdict,activity_position,field,reason}：通过时 verdict=pass 且后三项都为 null；"
+    "不通过时 verdict=fail，activity_position 是有问题活动的 0 起位置，field 是对应正文栏位，reason 是简短原因。"
 )
 
 
@@ -213,6 +221,23 @@ def _usage(response) -> dict:
     return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
 
 
+def _call_json(client, system: str, user: str, max_tokens: int) -> tuple[dict, dict]:
+    response = client.chat.completions.create(
+        model=MODEL, temperature=0.0, max_tokens=max_tokens,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+    )
+    content = response.choices[0].message.content
+    if not isinstance(content, str):
+        raise ValueError("LLM 响应 content 必须是字符串")
+    try:
+        raw = json.loads(_strip_fence(content))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"LLM 响应不是合法 JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("LLM 响应 JSON 必须是对象")
+    return raw, _usage(response)
+
+
 def _generate_raw(student: dict, request: dict, context: list[dict], client) -> tuple[dict, dict]:
     user = (
         f"学生档案：{json.dumps(_student_context(student), ensure_ascii=False)}\n"
@@ -226,22 +251,48 @@ def _generate_raw(student: dict, request: dict, context: list[dict], client) -> 
         "defer_if_old_knowledge_weak、material_basis([{material_id,page,locator}])、selected_statement_ids、assumption_ids。"
         "若 old_knowledge_weak 为 true，保留函数活动并标记可推迟。"
     )
-    response = client.chat.completions.create(
-        model=MODEL, temperature=0.2, max_tokens=MAX_TOKENS,
-        messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+    return _call_json(client, _SYSTEM, user, MAX_TOKENS)
+
+
+def _validate_verdict(raw: dict, activity_count: int) -> dict:
+    required = {"verdict", "activity_position", "field", "reason"}
+    if set(raw) != required or raw.get("verdict") not in ("pass", "fail"):
+        raise ValueError("verifier verdict 必须是严格的 pass/fail 结构")
+    if raw["verdict"] == "pass":
+        if any(raw[field] is not None for field in ("activity_position", "field", "reason")):
+            raise ValueError("verifier verdict=pass 时不得包含违规定位")
+        return raw
+    position, field, reason = raw["activity_position"], raw["field"], raw["reason"]
+    if (isinstance(position, bool) or not isinstance(position, int) or not 0 <= position < activity_count
+            or field not in _TEXT_FIELDS or not isinstance(reason, str) or not reason.strip()):
+        raise ValueError("verifier verdict=fail 必须提供合法活动、字段和原因")
+    return raw
+
+
+def _verify_candidate(candidate: dict, student: dict, verifier) -> tuple[dict, dict]:
+    if verifier is None:
+        raise ValueError("语义 verifier 未配置，未保存备课候选")
+    teacher_profile = {
+        "assumptions": _progress_assumptions(student),
+        "observed_errors": student["observed_errors"],
+        "independent_tasks": student["independent_tasks"],
+    }
+    user = (
+        f"teacher_profile：{json.dumps(teacher_profile, ensure_ascii=False)}\n"
+        f"candidate：{json.dumps(candidate, ensure_ascii=False)}\n"
+        "核验候选全部正文，按规定返回 verdict。"
     )
-    content = response.choices[0].message.content
-    if not isinstance(content, str):
-        raise ValueError("LLM 响应 content 必须是字符串")
-    try:
-        raw = json.loads(_strip_fence(content))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"LLM 响应不是合法 JSON: {exc}") from exc
-    return raw, _usage(response)
+    raw, usage = _call_json(verifier, _VERIFIER_SYSTEM, user, VERIFIER_MAX_TOKENS)
+    return _validate_verdict(raw, len(candidate["activities"])), usage
 
 
-def generate(student_id: int, data: dict, client) -> dict:
-    """主动生成时唯一调用模型；先校验候选，后写候选稿和本次用量。"""
+def _combined_usage(generation: dict, verification: dict) -> dict:
+    return {key: generation[key] + verification[key]
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+
+
+def generate(student_id: int, data: dict, client, verifier=None) -> dict:
+    """一次主动生成串行完成候选和 fail-closed 语义核验，成功后才写候选稿与合计用量。"""
     if isinstance(student_id, bool) or not isinstance(student_id, int):
         raise ValueError("student_id 必须是整数")
     student = store.get_student_record(student_id)
@@ -251,6 +302,10 @@ def generate(student_id: int, data: dict, client) -> dict:
     context = _material_context(student_id)
     raw, usage = _generate_raw(student, request, context, client)
     candidate = validate_candidate(raw, student, context, request)
+    verdict, verifier_usage = _verify_candidate(candidate, student, verifier)
+    if verdict["verdict"] == "fail":
+        raise ValueError(f"语义 verifier 拒绝活动 {verdict['activity_position']} 的 {verdict['field']}：{verdict['reason']}")
+    usage = _combined_usage(usage, verifier_usage)
     plan_id = store.create_generated_lesson_plan_with_usage({
         "student_id": student_id, "title": candidate["title"], "course_objective": request["course_objective"],
         "total_minutes": request["total_minutes"], "math_minutes": request["math_minutes"],

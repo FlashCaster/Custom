@@ -88,6 +88,19 @@ def _client(payload: dict, usage=(21, 34), captured=None):
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
 
+def _verifier(verdict=None, usage=(3, 5), captured=None):
+    verdict = verdict or {"verdict": "pass", "activity_position": None, "field": None, "reason": None}
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(verdict, ensure_ascii=False)))],
+        usage=None if usage is None else SimpleNamespace(prompt_tokens=usage[0], completion_tokens=usage[1]),
+    )
+    def create(**kwargs):
+        if captured is not None:
+            captured.update(kwargs)
+        return response
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+
 def test_generation_uses_only_selected_read_material_and_persists_candidate_and_usage(db):
     student = _student()
     material = _selected_material(student["id"])
@@ -96,7 +109,7 @@ def test_generation_uses_only_selected_read_material_and_persists_candidate_and_
     plan = generated_lesson_plans.generate(
         student["id"], {"course_objective": "先检查集合与不等式，再视情况进入函数概念",
                         "total_minutes": 120, "math_minutes": 80, "old_knowledge_weak": True},
-        _client(raw),
+        _client(raw), _verifier(),
     )
 
     assert plan["student_id"] == student["id"]
@@ -110,9 +123,9 @@ def test_generation_uses_only_selected_read_material_and_persists_candidate_and_
         "selected_statements": [{"id": material["statements"][0]["id"], "topic": "函数定义",
                                  "text": "函数要求定义域内每一个输入恰好对应一个输出。", "page": 12}],
     }]
-    assert plan["usage"] == {"prompt_tokens": 21, "completion_tokens": 34, "total_tokens": 55}
+    assert plan["usage"] == {"prompt_tokens": 24, "completion_tokens": 39, "total_tokens": 63}
     assert store.get_generated_lesson_plan(plan["id"])["activities"] == plan["activities"]
-    assert store.list_generation_usage_records(plan["id"])[0]["total_tokens"] == 55
+    assert store.list_generation_usage_records(plan["id"])[0]["total_tokens"] == 63
 
 
 def test_generation_rejects_unread_or_unselected_sources_and_does_not_create_a_plan(db):
@@ -124,7 +137,7 @@ def test_generation_rejects_unread_or_unselected_sources_and_does_not_create_a_p
     with pytest.raises(ValueError, match="已选择且实际读取"):
         generated_lesson_plans.generate(
             student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
-                            "math_minutes": 80, "old_knowledge_weak": False}, _client(raw),
+                            "math_minutes": 80, "old_knowledge_weak": False}, _client(raw), _verifier(),
         )
 
     assert store.list_generated_lesson_plans() == []
@@ -139,7 +152,7 @@ def test_generation_rejects_a_material_statement_that_the_teacher_did_not_choose
     with pytest.raises(ValueError, match="教师已选择"):
         generated_lesson_plans.generate(
             student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
-                            "math_minutes": 80, "old_knowledge_weak": False}, _client(raw),
+                            "math_minutes": 80, "old_knowledge_weak": False}, _client(raw), _verifier(),
         )
 
     assert store.list_generated_lesson_plans() == []
@@ -155,7 +168,7 @@ def test_generation_requires_both_topics_and_rejects_independent_unknown_progres
     with pytest.raises(ValueError, match="独立的学校进度声明"):
         generated_lesson_plans.generate(
             student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
-                            "math_minutes": 80, "old_knowledge_weak": False}, _client(raw),
+                            "math_minutes": 80, "old_knowledge_weak": False}, _client(raw), _verifier(),
         )
 
     assert store.list_generated_lesson_plans() == []
@@ -169,7 +182,7 @@ def test_generation_sends_a_minimal_student_context_without_identity_or_storage_
     generated_lesson_plans.generate(
         student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
                         "math_minutes": 80, "old_knowledge_weak": False},
-        _client(_candidate(material["id"], material["statements"][0]["id"]), captured=captured),
+        _client(_candidate(material["id"], material["statements"][0]["id"]), captured=captured), _verifier(),
     )
 
     student_context = generated_lesson_plans._student_context(student)
@@ -193,7 +206,7 @@ def test_generation_fails_without_reported_usage_instead_of_persisting_zero_toke
         generated_lesson_plans.generate(
             student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
                             "math_minutes": 80, "old_knowledge_weak": False},
-            _client(_candidate(material["id"], material["statements"][0]["id"]), usage=None),
+            _client(_candidate(material["id"], material["statements"][0]["id"]), usage=None), _verifier(),
         )
 
     assert store.list_generated_lesson_plans() == []
@@ -205,7 +218,7 @@ def test_manual_edit_save_persists_only_editable_fields_and_preserves_provenance
     original = generated_lesson_plans.generate(
         student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
                         "math_minutes": 80, "old_knowledge_weak": False},
-        _client(_candidate(material["id"], material["statements"][0]["id"])),
+        _client(_candidate(material["id"], material["statements"][0]["id"])), _verifier(),
     )
     edits = [dict(activity) for activity in original["activities"]]
     edits[0]["title"] = "集合检查（教师改写）"
@@ -219,3 +232,43 @@ def test_manual_edit_save_persists_only_editable_fields_and_preserves_provenance
     assert saved["title"] == "更新后的备课稿"
     assert saved["activities"][0]["student_task"] == "先代入，再写每一步理由。"
     assert saved["activities"][0]["material_basis"] == original["activities"][0]["material_basis"]
+
+
+def test_verifier_rejects_the_unknown_progress_claim_in_activity_text_without_persisting(db):
+    student = _student()
+    material = _selected_material(student["id"])
+    raw = _candidate(material["id"], material["statements"][0]["id"])
+    raw["activities"][1]["student_task"] = "学生已经学过函数性质，请直接判断单调性。"
+    fail = {"verdict": "fail", "activity_position": 1, "field": "student_task",
+            "reason": "学校进度未知，正文不得声称学生已经学习函数性质。"}
+    captured = {}
+
+    with pytest.raises(ValueError, match="语义 verifier 拒绝"):
+        generated_lesson_plans.generate(
+            student["id"], {"course_objective": "集合与函数", "total_minutes": 120,
+                            "math_minutes": 80, "old_knowledge_weak": False}, _client(raw),
+            _verifier(fail, captured=captured),
+        )
+
+    verifier_input = captured["messages"][1]["content"]
+    assert "学生已经学过函数性质" in verifier_input
+    assert "school_progress" in verifier_input
+    assert "集合条件代入后仍会漏看不等式方向" in verifier_input
+    assert store.list_generated_lesson_plans() == []
+
+
+def test_invalid_verifier_verdict_or_missing_verifier_usage_fails_closed(db):
+    student = _student()
+    material = _selected_material(student["id"])
+    raw = _candidate(material["id"], material["statements"][0]["id"])
+    request = {"course_objective": "集合与函数", "total_minutes": 120,
+               "math_minutes": 80, "old_knowledge_weak": False}
+
+    with pytest.raises(ValueError, match="verifier verdict"):
+        generated_lesson_plans.generate(student["id"], request, _client(raw), _verifier({"verdict": "pass"}))
+    with pytest.raises(ValueError, match="模型用量缺失"):
+        generated_lesson_plans.generate(student["id"], request, _client(raw), _verifier(usage=None))
+    with pytest.raises(ValueError, match="语义 verifier 未配置"):
+        generated_lesson_plans.generate(student["id"], request, _client(raw), None)
+
+    assert store.list_generated_lesson_plans() == []
